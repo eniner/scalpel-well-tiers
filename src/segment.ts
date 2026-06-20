@@ -8,7 +8,9 @@ export interface Option {
   box: { x: number; y: number; w: number; h: number }
 }
 
-/** Cluster OCR words into lines (vertical overlap), then group lines into options (vertical gap). */
+/** Cluster OCR words into lines (vertical overlap), then group lines into options (vertical gap).
+ *  Within an option, words are read top-to-bottom by line, left-to-right within a line - OCR gives
+ *  same-line words slightly different y0, so a naive y0-then-x0 sort scrambles reading order. */
 export function segment(words: Word[], opts: { minConfidence?: number } = {}): Option[] {
   const minConf = opts.minConfidence ?? 50
   const kept = words.filter((w) => w.confidence >= minConf && w.text.trim())
@@ -34,7 +36,10 @@ export function segment(words: Word[], opts: { minConfidence?: number } = {}): O
     prevBottom = Math.max(...line.map((w) => w.bbox.y1))
   }
   return groups.map((g) => {
-    const ws = g.flat().sort((a, b) => a.bbox.y0 - b.bbox.y0 || a.bbox.x0 - b.bbox.x0)
+    const orderedLines = g
+      .map((line) => [...line].sort((a, b) => a.bbox.x0 - b.bbox.x0))
+      .sort((l1, l2) => Math.min(...l1.map((w) => w.bbox.y0)) - Math.min(...l2.map((w) => w.bbox.y0)))
+    const ws = orderedLines.flat()
     const text = ws.map((w) => w.text).join(' ')
     const x = Math.min(...ws.map((w) => w.bbox.x0))
     const y = Math.min(...ws.map((w) => w.bbox.y0))

@@ -14,6 +14,17 @@ test('groups two close lines into one option, far line into another', () => {
   expect(opts[1].text).toContain('174')
 })
 
+test('preserves reading order when same-line words have jittered y0 (real OCR)', () => {
+  // Same visual line, but each word reports a slightly different y0 (as tesseract does).
+  const opts = segment([
+    { text: 'A', bbox: { x0: 10, y0: 100, x1: 30, y1: 112 }, confidence: 90 },
+    { text: 'B', bbox: { x0: 40, y0: 102, x1: 60, y1: 113 }, confidence: 90 },
+    { text: 'C', bbox: { x0: 70, y0: 99, x1: 90, y1: 111 }, confidence: 90 },
+  ])
+  expect(opts).toHaveLength(1)
+  expect(opts[0].text).toBe('A B C')
+})
+
 test('drops low-confidence junk words', () => {
   const junk = { text: 'a4', bbox: { x0: 0, y0: 0, x1: 5, y1: 5 }, confidence: 10 }
   expect(segment([junk, w('+174 MANA', 200)])).toHaveLength(1)
