@@ -25,7 +25,10 @@ export function buildTierMap(): Map<string, Tier[]> {
     if (mod.s.length !== 1) continue
     const [id, lo, hi] = mod.s[0]
     const d = id.endsWith('_permyriad') ? 100 : 1
-    push(normKey(mod.t), { min: lo / d, max: hi / d, lvl: mod.l })
+    // "reduced"/"faster" mods store negative ranges but render as positive; match in absolute space.
+    const a = Math.abs(lo / d)
+    const b = Math.abs(hi / d)
+    push(normKey(mod.t), { min: Math.min(a, b), max: Math.max(a, b), lvl: mod.l })
   }
   for (const arr of map.values()) arr.sort((a, b) => a.min - b.min)
   return map

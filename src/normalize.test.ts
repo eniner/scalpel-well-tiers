@@ -7,9 +7,15 @@ test('normKey matches OCR text to dataset template', () => {
   expect(normKey('+174 TO MAXIMUM MANA')).toBe('# TO MAXIMUM MANA')
 })
 
+test('normKey collapses +N (OCR) and +(N-M) (template) to the same key', () => {
+  expect(normKey('+(35-50) to Spirit')).toBe('# TO SPIRIT')
+  expect(normKey('+(35-50) to Spirit')).toBe(normKey('+174 to Spirit'))
+})
+
 test('extractValue pulls the rolled number', () => {
   expect(extractValue('169% INCREASED SPELL DAMAGE')).toBe(169)
   expect(extractValue('+174 TO MAXIMUM MANA')).toBe(174)
   expect(extractValue('GAIN 29% OF DAMAGE AS EXTRA LIGHTNING DAMAGE')).toBe(29)
+  expect(extractValue('1,746 LIFE REGENERATION')).toBe(1746)
   expect(extractValue('NO NUMBER HERE')).toBe(null)
 })
