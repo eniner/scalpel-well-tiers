@@ -45,7 +45,7 @@ export async function runOcr(frame: Frame): Promise<Word[]> {
   }
   sctx.putImageData(img, 0, 0)
 
-  const scale = 3
+  const scale = Math.min(3, Math.max(1, Math.round(3600 / frame.width)))
   const up = document.createElement('canvas')
   up.width = src.width * scale
   up.height = src.height * scale

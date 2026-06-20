@@ -1,4 +1,4 @@
-import { buildTierMap } from './dataset'
+import { BASE_NAMES, buildTierMap } from './dataset'
 import { normKey } from './normalize'
 
 test('buildTierMap exposes the desecrated cost-Life ladder', () => {
@@ -8,7 +8,15 @@ test('buildTierMap exposes the desecrated cost-Life ladder', () => {
   expect(tiers?.[0]).toMatchObject({ min: 74, max: 89 })
 })
 
-test('buildTierMap includes item-domain ladders (max mana)', () => {
-  const map = buildTierMap()
-  expect((map.get(normKey('+(60-69) to maximum Mana'))?.length ?? 0)).toBeGreaterThan(1)
+test('BASE_NAMES maps uppercased OCR text back to the original base name', () => {
+  expect(BASE_NAMES.get('GELID STAFF')).toBe('Gelid Staff')
+})
+
+test('base-scoping yields a narrower lightning ladder than the merged fallback', () => {
+  const key = normKey('Gain (9-15)% of Damage as Extra Lightning Damage')
+  const merged = buildTierMap()?.get(key)?.length ?? 0
+  const scoped = buildTierMap('Gelid Staff')?.get(key)?.length ?? 0
+  expect(merged).toBeGreaterThan(1)
+  expect(scoped).toBeGreaterThan(0)
+  expect(scoped).toBeLessThan(merged)
 })

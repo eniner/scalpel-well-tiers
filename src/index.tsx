@@ -1,9 +1,9 @@
 import type { GameCapture, ScalpelPluginContext } from '@scalpelpoe/plugin-sdk'
 import { buildTierMap } from './dataset'
-import { resolveTier } from './match'
-import { extractValue } from './normalize'
+import { detectBaseType } from './detect'
+import { extractOptions } from './match'
 import { runOcr } from './ocr'
-import { segment } from './segment'
+import { toLines } from './segment'
 
 interface Label {
   x: number
@@ -21,7 +21,6 @@ const CLEAR_MS = 12000
 
 export default function activate(ctx: ScalpelPluginContext): void {
   if (ctx.getPoeVersion() !== 2) return
-  const map = buildTierMap()
 
   ctx.registerHotkey({ label: 'Reveal well tiers' }, async () => {
     const frame: GameCapture | null = await ctx.captureGameWindow()
@@ -30,23 +29,20 @@ export default function activate(ctx: ScalpelPluginContext): void {
       return
     }
     const words = await runOcr(frame)
-    const items: Label[] = []
-    for (const opt of segment(words)) {
-      const v = extractValue(opt.text)
-      if (v == null) continue
-      const r = resolveTier(map, opt.text, v)
-      if (!r) continue
-      items.push({
-        x: frame.origin.x + opt.box.x / frame.scale,
-        y: frame.origin.y + opt.box.y / frame.scale,
-        text: r.aboveTop ? '>=T1?' : `T${r.count - r.rank + 1}/${r.count}`,
-        top: r.rank === r.count,
-      })
-    }
+    const base = detectBaseType(words)
+    const map = buildTierMap(base)
+    const lines = toLines(words)
+    const options = extractOptions(map, lines)
+    const items: Label[] = options.map(({ box, result: r }) => ({
+      x: frame.origin.x + box.x / frame.scale,
+      y: frame.origin.y + box.y / frame.scale,
+      text: r.aboveTop ? '>=T1?' : `T${r.count - r.rank + 1}/${r.count}`,
+      top: r.rank === r.count,
+    }))
     const fire: Fire = { token: String(Date.now()), firedAt: Date.now(), items }
     await ctx.storage.set('lastFire', fire)
     ctx.openOverlay()
-    ctx.log(`well-tiers: ${items.length} of ${segment(words).length} options matched`)
+    ctx.log(`well-tiers: base=${base ?? 'unknown'}, ${items.length} tiers from ${lines.length} lines`)
   })
 
   ctx.registerOverlay({ mode: 'annotation', title: 'Well Tiers' }, (container) => {

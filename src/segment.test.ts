@@ -1,31 +1,26 @@
-import { segment } from './segment'
+import { toLines } from './segment'
 
-const w = (text: string, y: number, x = 10) => ({
+const w = (text: string, x: number, y: number, jit = 0) => ({
   text,
-  bbox: { x0: x, y0: y, x1: x + 50, y1: y + 12 },
+  bbox: { x0: x, y0: y + jit, x1: x + 40, y1: y + 12 + jit },
   confidence: 90,
 })
 
-test('groups two close lines into one option, far line into another', () => {
-  const opts = segment([w('169%', 100), w('SPELLS', 100, 70), w('THAT COST LIFE', 114), w('+174 MANA', 200)])
-  expect(opts).toHaveLength(2)
-  expect(opts[0].text).toContain('169%')
-  expect(opts[0].text).toContain('THAT COST LIFE')
-  expect(opts[1].text).toContain('174')
+test('splits a row into separate lines across a wide horizontal gap', () => {
+  // "169% LIFE" on the left, "INVENTORY" far right on the SAME row -> two lines.
+  const lines = toLines([w('169%', 10, 100), w('LIFE', 55, 100), w('INVENTORY', 900, 100)])
+  expect(lines).toHaveLength(2)
+  expect(lines.find((l) => l.text === '169% LIFE')).toBeTruthy()
+  expect(lines.find((l) => l.text === 'INVENTORY')).toBeTruthy()
 })
 
-test('preserves reading order when same-line words have jittered y0 (real OCR)', () => {
-  // Same visual line, but each word reports a slightly different y0 (as tesseract does).
-  const opts = segment([
-    { text: 'A', bbox: { x0: 10, y0: 100, x1: 30, y1: 112 }, confidence: 90 },
-    { text: 'B', bbox: { x0: 40, y0: 102, x1: 60, y1: 113 }, confidence: 90 },
-    { text: 'C', bbox: { x0: 70, y0: 99, x1: 90, y1: 111 }, confidence: 90 },
-  ])
-  expect(opts).toHaveLength(1)
-  expect(opts[0].text).toBe('A B C')
+test('keeps reading order within a line despite per-word y jitter', () => {
+  const lines = toLines([w('A', 10, 100, 0), w('B', 55, 100, 2), w('C', 100, 100, -1)])
+  expect(lines).toHaveLength(1)
+  expect(lines[0].text).toBe('A B C')
 })
 
-test('drops low-confidence junk words', () => {
-  const junk = { text: 'a4', bbox: { x0: 0, y0: 0, x1: 5, y1: 5 }, confidence: 10 }
-  expect(segment([junk, w('+174 MANA', 200)])).toHaveLength(1)
+test('drops low-confidence junk', () => {
+  const junk = { text: 'x', bbox: { x0: 0, y0: 0, x1: 5, y1: 5 }, confidence: 10 }
+  expect(toLines([junk, w('GAIN', 10, 200)])).toHaveLength(1)
 })
