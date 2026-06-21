@@ -47,8 +47,9 @@ function unionBox(a: Box, b: Box): Box {
  * Match OCR lines against the tier vocabulary. For each line carrying a value, find
  * the LONGEST known mod key that is a substring of the cleaned+normalized line, and
  * also of the line joined with its same-column wrap continuation; keep whichever is
- * longer (so a wrapped mod resolves to its full key, not a short prefix). The known
- * vocabulary is the filter - UI noise matches nothing. One option per matched line.
+ * longer. Then collapse fragments of the same mod (one match's key being a substring
+ * of a nearby, x-overlapping match's key) so a wrapped option yields a single label.
+ * The known vocabulary is the filter - UI noise matches nothing.
  */
 export function extractOptions(map: Map<string, Tier[]>, lines: Line[]): OptionTier[] {
   const keys = [...map.keys()].sort((a, b) => b.length - a.length)
@@ -84,5 +85,18 @@ export function extractOptions(map: Map<string, Tier[]>, lines: Line[]): OptionT
     const rank = tiers.indexOf(tier) + 1
     out.push({ box, key, result: { rank, count: tiers.length, tier, aboveTop: value > tiers[tiers.length - 1].max } })
   }
-  return out
+  // Collapse same-mod fragments: a long wrapped mod (or a double OCR read) can yield
+  // several partial matches whose keys are substrings of each other. Keep the
+  // longest-key one; distinct mods (unrelated keys) are never merged.
+  const deduped: OptionTier[] = []
+  for (const o of [...out].sort((a, b) => b.key.length - a.key.length)) {
+    const dup = deduped.some(
+      (k) =>
+        overlapsX(k.box, o.box) &&
+        Math.abs(k.box.y - o.box.y) < Math.max(k.box.h, o.box.h, 14) * 4 &&
+        (k.key === o.key || k.key.includes(o.key) || o.key.includes(k.key)),
+    )
+    if (!dup) deduped.push(o)
+  }
+  return deduped.sort((a, b) => a.box.y - b.box.y)
 }

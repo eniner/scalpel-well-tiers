@@ -74,24 +74,30 @@ export async function runOcr(frame: Frame): Promise<OcrResult> {
   const { data } = await worker.recognize(out, {}, { blocks: true })
   const inv = 1 / ocrScale
   type TW = { text: string; confidence: number; bbox: { x0: number; y0: number; x1: number; y1: number } }
-  type TL = { words?: TW[]; bbox: { x0: number; y0: number; x1: number; y1: number } }
+  type TL = { words?: TW[] }
   const d = data as unknown as { words?: TW[]; lines?: TL[] }
   const words: Word[] = (d.words ?? []).map((w) => ({
     text: w.text,
     confidence: w.confidence,
     bbox: { x0: w.bbox.x0 * inv, y0: w.bbox.y0 * inv, x1: w.bbox.x1 * inv, y1: w.bbox.y1 * inv },
   }))
-  const lines: Line[] = (d.lines ?? [])
-    .map((l) => {
-      const text = (l.words ?? [])
-        .filter((w) => w.confidence >= 55)
-        .map((w) => w.text)
-        .join(' ')
-        .replace(/\s+/g, ' ')
-        .trim()
-      const b = l.bbox
-      return { text, box: { x: b.x0 * inv, y: b.y0 * inv, w: (b.x1 - b.x0) * inv, h: (b.y1 - b.y0) * inv } }
-    })
-    .filter((l) => l.text)
+  const lines: Line[] = []
+  for (const l of d.lines ?? []) {
+    // Build text AND the box from the high-confidence words only. The tesseract
+    // line bbox spans the dialog's decorative border art; the kept words are the
+    // actual mod text, so their union box positions the label correctly.
+    const kept = (l.words ?? []).filter((w) => w.confidence >= 55)
+    const text = kept
+      .map((w) => w.text)
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+    if (!text) continue
+    const x0 = Math.min(...kept.map((w) => w.bbox.x0))
+    const y0 = Math.min(...kept.map((w) => w.bbox.y0))
+    const x1 = Math.max(...kept.map((w) => w.bbox.x1))
+    const y1 = Math.max(...kept.map((w) => w.bbox.y1))
+    lines.push({ text, box: { x: x0 * inv, y: y0 * inv, w: (x1 - x0) * inv, h: (y1 - y0) * inv } })
+  }
   return { words, lines }
 }

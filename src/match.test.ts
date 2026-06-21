@@ -32,3 +32,12 @@ test('extractOptions joins a wrap continuation and tolerates edge junk, preferri
   expect(opts).toHaveLength(1)
   expect(opts[0].result).toMatchObject({ rank: 2, count: 2 })
 })
+
+test('extractOptions collapses fragment matches of the same wrapped mod', () => {
+  const opts = extractOptions(map, [
+    line('169% INCREASED SPELL DAMAGE', 100, 100, 14),
+    line('169% INCREASED SPELL DAMAGE WITH SPELLS THAT COST LIFE', 100, 118, 14),
+  ])
+  expect(opts).toHaveLength(1)
+  expect(opts[0].key).toContain('COST LIFE')
+})
