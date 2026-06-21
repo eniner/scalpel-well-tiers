@@ -1,7 +1,7 @@
 import type { GameCapture, ScalpelPluginContext } from '@scalpelpoe/plugin-sdk'
 import { buildTierMap } from './dataset'
 import { detectBaseType } from './detect'
-import { extractOptions } from './match'
+import { extractOptions, findOptionsBoundary } from './match'
 import { runOcr } from './ocr'
 
 interface Label {
@@ -38,7 +38,10 @@ export default function activate(ctx: ScalpelPluginContext): void {
     const { words, lines } = await runOcr(frame)
     const base = detectBaseType(words)
     const map = buildTierMap(base)
-    const options = extractOptions(map, lines)
+    // Keep only the desecrated options (below the reveal hint); skip the item's existing tooltip mods.
+    const boundary = findOptionsBoundary(lines)
+    const optionLines = boundary == null ? lines : lines.filter((l) => l.box.y > boundary)
+    const options = extractOptions(map, optionLines)
     const items: Label[] = options.map(({ box, result: r }) => ({
       x: frame.origin.x + box.x / frame.scale,
       y: frame.origin.y + box.y / frame.scale,

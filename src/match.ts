@@ -100,3 +100,22 @@ export function extractOptions(map: Map<string, Tier[]>, lines: Line[]): OptionT
   }
   return deduped.sort((a, b) => a.box.y - b.box.y)
 }
+
+/**
+ * The well's "...reveal the Desecrated Modifier" hint line sits between the item's
+ * existing mods (above) and the desecrated options the player can add (below).
+ * Return the Y below which the options live, or null if the hint isn't found (the
+ * tokens DESECRATED / REVEAL / TAKE+ITEM appear only in that hint, never in the
+ * "THE WELL OF SOULS" title, so they don't false-anchor on the dialog header).
+ */
+export function findOptionsBoundary(lines: Line[]): number | null {
+  let y: number | null = null
+  for (const l of lines) {
+    const t = l.text.toUpperCase()
+    if (t.includes('DESECRATED') || t.includes('REVEA') || (t.includes('TAKE') && t.includes('ITEM'))) {
+      const bottom = l.box.y + l.box.h
+      if (y == null || bottom > y) y = bottom
+    }
+  }
+  return y
+}

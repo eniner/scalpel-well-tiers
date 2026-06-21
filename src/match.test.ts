@@ -1,5 +1,5 @@
 import { buildTierMap } from './dataset'
-import { extractOptions, resolveTier, valueToTier } from './match'
+import { extractOptions, findOptionsBoundary, resolveTier, valueToTier } from './match'
 import type { Line } from './segment'
 
 const map = buildTierMap()
@@ -40,4 +40,17 @@ test('extractOptions collapses fragment matches of the same wrapped mod', () => 
   ])
   expect(opts).toHaveLength(1)
   expect(opts[0].key).toContain('COST LIFE')
+})
+
+test('findOptionsBoundary returns the bottom of the reveal-hint line', () => {
+  const lines = [
+    { text: '44% INCREASED COLD DAMAGE', box: { x: 100, y: 50, w: 200, h: 14 } },
+    { text: 'TAKE THIS ITEM TO THE WELL OF SOULS TO REVEAL THE DESECRATED MODIFIER', box: { x: 100, y: 100, w: 400, h: 16 } },
+    { text: '+174 TO MAXIMUM MANA', box: { x: 100, y: 160, w: 200, h: 14 } },
+  ]
+  expect(findOptionsBoundary(lines)).toBe(116)
+})
+
+test('findOptionsBoundary is null when no hint present', () => {
+  expect(findOptionsBoundary([{ text: '+174 TO MAXIMUM MANA', box: { x: 0, y: 0, w: 10, h: 10 } }])).toBe(null)
 })
