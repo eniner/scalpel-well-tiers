@@ -50,7 +50,7 @@ export default function activate(ctx: ScalpelPluginContext): void {
     const placed = options.map(({ box, result: r }) => ({
       x: frame.origin.x + box.x / frame.scale,
       y: frame.origin.y + (box.y + box.h / 2) / frame.scale,
-      text: r.aboveTop ? '>=T1?' : `T${r.count - r.rank + 1}/${r.count}`,
+      text: r.aboveTop ? 'T1?' : `T${r.count - r.rank + 1}`,
       top: r.rank === r.count,
     }))
     const columnX = placed.length ? Math.min(...placed.map((p) => p.x)) - COLUMN_OFFSET : 0
