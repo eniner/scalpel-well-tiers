@@ -11,7 +11,11 @@ export function normKey(text: string): string {
     .trim()
 }
 
+/** The rolled value of a mod line. Prefer the number attached to `%` or a leading
+ *  `+`, so OCR junk (e.g. a stray "[4" before "169%") doesn't steal the value. */
 export function extractValue(text: string): number | null {
-  const m = text.match(/[+-]?[0-9][0-9.,]*/)
-  return m ? Number(m[0].replace(/,/g, '')) : null
+  const tagged = text.match(/([+-]?\d[\d.,]*)\s*%/) || text.match(/\+\s*(\d[\d.,]*)/)
+  if (tagged) return Number(tagged[1].replace(/,/g, ''))
+  const any = text.match(/[+-]?\d[\d.,]*/)
+  return any ? Number(any[0].replace(/,/g, '')) : null
 }

@@ -11,6 +11,7 @@ export interface TierResult {
 export interface OptionTier {
   box: Box
   result: TierResult
+  key: string
 }
 
 /** Highest tier whose min <= value; clamps to the lowest tier below the floor. Ascending input. */
@@ -28,6 +29,11 @@ export function resolveTier(map: Map<string, Tier[]>, text: string, value: numbe
   return { rank, count: tiers.length, tier, aboveTop: value > tiers[tiers.length - 1].max }
 }
 
+// Drop decorative-border OCR junk (brackets, currency/symbol glyphs) flanking the
+// real mod text before normalizing for the substring match.
+function clean(text: string): string {
+  return text.replace(/[^A-Za-z0-9 %+().,-]+/g, ' ')
+}
 function overlapsX(a: Box, b: Box): boolean {
   return a.x < b.x + b.w && a.x + a.w > b.x
 }
@@ -38,35 +44,45 @@ function unionBox(a: Box, b: Box): Box {
 }
 
 /**
- * Find option mod-lines among OCR lines. A line is an option if its text resolves
- * to a tier; if it doesn't but carries a number, try joining its same-column wrap
- * continuation (the line directly below, x-overlapping) and resolve that. Matching
- * against the known mod vocabulary is the filter - UI noise resolves to nothing.
+ * Match OCR lines against the tier vocabulary. For each line carrying a value, find
+ * the LONGEST known mod key that is a substring of the cleaned+normalized line, and
+ * also of the line joined with its same-column wrap continuation; keep whichever is
+ * longer (so a wrapped mod resolves to its full key, not a short prefix). The known
+ * vocabulary is the filter - UI noise matches nothing. One option per matched line.
  */
 export function extractOptions(map: Map<string, Tier[]>, lines: Line[]): OptionTier[] {
+  const keys = [...map.keys()].sort((a, b) => b.length - a.length)
+  const longestKey = (text: string): string | null => {
+    const nk = normKey(clean(text))
+    for (const k of keys) if (k.length >= 12 && nk.includes(k)) return k // keys sorted desc -> first hit is longest
+    return null
+  }
   const out: OptionTier[] = []
   for (let i = 0; i < lines.length; i++) {
     const value = extractValue(lines[i].text)
     if (value == null) continue
-    let result = resolveTier(map, lines[i].text, value)
+    let key = longestKey(lines[i].text)
     let box = lines[i].box
-    if (!result) {
-      const below = lines.find(
-        (l, j) =>
-          j !== i &&
-          l.box.y > lines[i].box.y &&
-          l.box.y < lines[i].box.y + lines[i].box.h * 2.5 &&
-          overlapsX(l.box, lines[i].box),
-      )
-      if (below) {
-        const joined = resolveTier(map, `${lines[i].text} ${below.text}`, value)
-        if (joined) {
-          result = joined
-          box = unionBox(lines[i].box, below.box)
-        }
+    const below = lines.find(
+      (l, j) =>
+        j !== i &&
+        l.box.y > lines[i].box.y &&
+        l.box.y < lines[i].box.y + lines[i].box.h * 2.5 &&
+        overlapsX(l.box, lines[i].box),
+    )
+    if (below) {
+      const joined = longestKey(`${lines[i].text} ${below.text}`)
+      if (joined && (!key || joined.length > key.length)) {
+        key = joined
+        box = unionBox(lines[i].box, below.box)
       }
     }
-    if (result) out.push({ box, result })
+    if (!key) continue
+    const tiers = map.get(key)
+    if (!tiers) continue
+    const tier = valueToTier(tiers, value)
+    const rank = tiers.indexOf(tier) + 1
+    out.push({ box, key, result: { rank, count: tiers.length, tier, aboveTop: value > tiers[tiers.length - 1].max } })
   }
   return out
 }

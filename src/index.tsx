@@ -3,7 +3,6 @@ import { buildTierMap } from './dataset'
 import { detectBaseType } from './detect'
 import { extractOptions } from './match'
 import { runOcr } from './ocr'
-import { toLines } from './segment'
 
 interface Label {
   x: number
@@ -28,10 +27,17 @@ export default function activate(ctx: ScalpelPluginContext): void {
       ctx.log('well-tiers: PoE not focused')
       return
     }
-    const words = await runOcr(frame)
+    // Immediate feedback during the OCR pass.
+    await ctx.storage.set('lastFire', {
+      token: `reading-${Date.now()}`,
+      firedAt: Date.now(),
+      items: [{ x: frame.origin.x + frame.gameSize.width * 0.32, y: frame.origin.y + frame.gameSize.height * 0.28, text: 'reading tiers...', top: false }],
+    } satisfies Fire)
+    ctx.openOverlay()
+
+    const { words, lines } = await runOcr(frame)
     const base = detectBaseType(words)
     const map = buildTierMap(base)
-    const lines = toLines(words)
     const options = extractOptions(map, lines)
     const items: Label[] = options.map(({ box, result: r }) => ({
       x: frame.origin.x + box.x / frame.scale,
@@ -39,9 +45,7 @@ export default function activate(ctx: ScalpelPluginContext): void {
       text: r.aboveTop ? '>=T1?' : `T${r.count - r.rank + 1}/${r.count}`,
       top: r.rank === r.count,
     }))
-    const fire: Fire = { token: String(Date.now()), firedAt: Date.now(), items }
-    await ctx.storage.set('lastFire', fire)
-    ctx.openOverlay()
+    await ctx.storage.set('lastFire', { token: String(Date.now()), firedAt: Date.now(), items } satisfies Fire)
     ctx.log(`well-tiers: base=${base ?? 'unknown'}, ${items.length} tiers from ${lines.length} lines`)
   })
 
@@ -70,19 +74,18 @@ export default function activate(ctx: ScalpelPluginContext): void {
         return // transient read failure: keep what's on screen, never clear on noise
       }
       if (r && r.token !== drawnToken) {
-        // A fresh fire: draw it and arm the local expiry.
         drawnToken = r.token
+        // Don't let an empty re-capture wipe good labels that are still fresh.
+        if (r.items.length === 0 && current && current.length > 0 && Date.now() < clearAt) return
         current = r.items
         clearAt = r.firedAt + CLEAR_MS
         draw(current)
       } else if (clearAt && Date.now() > clearAt) {
-        // Expired: clear once.
         clearAt = 0
         current = null
         container.innerHTML = ''
       } else if (current && container.childElementCount === 0) {
-        // The host wiped the surface (show/hide cycle) while we should be visible: restore.
-        draw(current)
+        draw(current) // host wiped the surface while we should be visible: restore
       }
     }
 

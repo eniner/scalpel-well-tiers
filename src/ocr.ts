@@ -1,5 +1,5 @@
 import { createWorker, type Worker } from 'tesseract.js'
-import type { Word } from './segment'
+import type { Line, Word } from './segment'
 
 let workerP: Promise<Worker> | null = null
 
@@ -14,18 +14,43 @@ interface Frame {
   width: number
   height: number
 }
+export interface OcrResult {
+  words: Word[]
+  lines: Line[]
+}
 
-/** Canvas-preprocess (grayscale + contrast-normalize + 3x upscale, the spike-proven
- *  recipe) then OCR. Returned word boxes are scaled back to original frame px. */
-export async function runOcr(frame: Frame): Promise<Word[]> {
-  const src = document.createElement('canvas')
-  src.width = frame.width
-  src.height = frame.height
-  const sctx = src.getContext('2d')
-  if (!sctx) return []
-  sctx.putImageData(new ImageData(new Uint8ClampedArray(frame.pixels), frame.width, frame.height), 0, 0)
+// Crop to the left portion (the well dialog + item tooltip live here; the inventory
+// panel on the right is dropped - less to OCR and no false matches from item names).
+const CROP_W_FRAC = 0.72
+// Cap the OCR raster width so a 4K capture isn't 10s of tesseract; ~2000px keeps
+// the well text legible while staying fast.
+const TARGET_W = 2000
 
-  const img = sctx.getImageData(0, 0, src.width, src.height)
+/** Crop + downscale + grayscale-normalize the captured frame, OCR it, and return
+ *  both words (for base detection) and tesseract's native lines (for option
+ *  matching). All boxes are mapped back to original frame px. */
+export async function runOcr(frame: Frame): Promise<OcrResult> {
+  const cropW = Math.max(1, Math.round(frame.width * CROP_W_FRAC))
+  const ocrScale = Math.min(2, Math.max(0.5, TARGET_W / cropW))
+  const outW = Math.max(1, Math.round(cropW * ocrScale))
+  const outH = Math.max(1, Math.round(frame.height * ocrScale))
+
+  const full = document.createElement('canvas')
+  full.width = frame.width
+  full.height = frame.height
+  const fctx = full.getContext('2d')
+  if (!fctx) return { words: [], lines: [] }
+  fctx.putImageData(new ImageData(new Uint8ClampedArray(frame.pixels), frame.width, frame.height), 0, 0)
+
+  const out = document.createElement('canvas')
+  out.width = outW
+  out.height = outH
+  const octx = out.getContext('2d')
+  if (!octx) return { words: [], lines: [] }
+  octx.imageSmoothingEnabled = true
+  octx.drawImage(full, 0, 0, cropW, frame.height, 0, 0, outW, outH)
+
+  const img = octx.getImageData(0, 0, outW, outH)
   let lo = 255
   let hi = 0
   for (let i = 0; i < img.data.length; i += 4) {
@@ -43,24 +68,30 @@ export async function runOcr(frame: Frame): Promise<Word[]> {
     img.data[i + 1] = v
     img.data[i + 2] = v
   }
-  sctx.putImageData(img, 0, 0)
-
-  const scale = Math.min(3, Math.max(1, Math.round(3600 / frame.width)))
-  const up = document.createElement('canvas')
-  up.width = src.width * scale
-  up.height = src.height * scale
-  const uctx = up.getContext('2d')
-  if (!uctx) return []
-  uctx.imageSmoothingEnabled = true
-  uctx.drawImage(src, 0, 0, up.width, up.height)
+  octx.putImageData(img, 0, 0)
 
   const worker = await getWorker()
-  const { data } = await worker.recognize(up)
-  const words =
-    (data as unknown as { words?: { text: string; confidence: number; bbox: { x0: number; y0: number; x1: number; y1: number } }[] }).words ?? []
-  return words.map((wd) => ({
-    text: wd.text,
-    confidence: wd.confidence,
-    bbox: { x0: wd.bbox.x0 / scale, y0: wd.bbox.y0 / scale, x1: wd.bbox.x1 / scale, y1: wd.bbox.y1 / scale },
+  const { data } = await worker.recognize(out, {}, { blocks: true })
+  const inv = 1 / ocrScale
+  type TW = { text: string; confidence: number; bbox: { x0: number; y0: number; x1: number; y1: number } }
+  type TL = { words?: TW[]; bbox: { x0: number; y0: number; x1: number; y1: number } }
+  const d = data as unknown as { words?: TW[]; lines?: TL[] }
+  const words: Word[] = (d.words ?? []).map((w) => ({
+    text: w.text,
+    confidence: w.confidence,
+    bbox: { x0: w.bbox.x0 * inv, y0: w.bbox.y0 * inv, x1: w.bbox.x1 * inv, y1: w.bbox.y1 * inv },
   }))
+  const lines: Line[] = (d.lines ?? [])
+    .map((l) => {
+      const text = (l.words ?? [])
+        .filter((w) => w.confidence >= 55)
+        .map((w) => w.text)
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+      const b = l.bbox
+      return { text, box: { x: b.x0 * inv, y: b.y0 * inv, w: (b.x1 - b.x0) * inv, h: (b.y1 - b.y0) * inv } }
+    })
+    .filter((l) => l.text)
+  return { words, lines }
 }
