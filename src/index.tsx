@@ -17,7 +17,7 @@ interface Fire {
   items: Label[]
 }
 
-const CLEAR_MS = 12000
+const CLEAR_MS = 20000
 
 export default function activate(ctx: ScalpelPluginContext): void {
   if (ctx.getPoeVersion() !== 2) return
@@ -46,17 +46,13 @@ export default function activate(ctx: ScalpelPluginContext): void {
   })
 
   ctx.registerOverlay({ mode: 'annotation', title: 'Well Tiers' }, (container) => {
-    let token = ''
-    const tick = async () => {
-      const r = await ctx.storage.get<Fire>('lastFire')
-      if (!r || Date.now() - r.firedAt > CLEAR_MS) {
-        if (container.childElementCount) container.innerHTML = ''
-        return
-      }
-      if (r.token === token) return
-      token = r.token
+    let drawnToken = ''
+    let clearAt = 0
+    let current: Label[] | null = null
+
+    const draw = (items: Label[]) => {
       container.innerHTML = ''
-      for (const it of r.items) {
+      for (const it of items) {
         const el = document.createElement('div')
         el.textContent = it.text
         el.style.cssText = `position:absolute;left:${it.x}px;top:${it.y}px;transform:translateX(-110%);font:bold 16px sans-serif;color:${
@@ -65,7 +61,32 @@ export default function activate(ctx: ScalpelPluginContext): void {
         container.appendChild(el)
       }
     }
-    const id = setInterval(tick, 200)
+
+    const tick = async () => {
+      let r: Fire | null = null
+      try {
+        r = await ctx.storage.get<Fire>('lastFire')
+      } catch {
+        return // transient read failure: keep what's on screen, never clear on noise
+      }
+      if (r && r.token !== drawnToken) {
+        // A fresh fire: draw it and arm the local expiry.
+        drawnToken = r.token
+        current = r.items
+        clearAt = r.firedAt + CLEAR_MS
+        draw(current)
+      } else if (clearAt && Date.now() > clearAt) {
+        // Expired: clear once.
+        clearAt = 0
+        current = null
+        container.innerHTML = ''
+      } else if (current && container.childElementCount === 0) {
+        // The host wiped the surface (show/hide cycle) while we should be visible: restore.
+        draw(current)
+      }
+    }
+
+    const id = setInterval(tick, 250)
     return () => clearInterval(id)
   })
 }
