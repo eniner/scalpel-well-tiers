@@ -19,7 +19,7 @@ interface Fire {
 const CLEAR_MS = 20000
 // How far left of the leftmost option text (CSS px) to seat the label column, so it
 // lands on the well box's left border rather than overlapping the mod text.
-const COLUMN_OFFSET = -40
+const COLUMN_OFFSET = -5
 
 export default function activate(ctx: ScalpelPluginContext): void {
   if (ctx.getPoeVersion() !== 2) return
