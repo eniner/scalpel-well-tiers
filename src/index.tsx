@@ -17,6 +17,9 @@ interface Fire {
 }
 
 const CLEAR_MS = 20000
+// How far left of the leftmost option text (CSS px) to seat the label column, so it
+// lands on the well box's left border rather than overlapping the mod text.
+const COLUMN_OFFSET = 30
 
 export default function activate(ctx: ScalpelPluginContext): void {
   if (ctx.getPoeVersion() !== 2) return
@@ -27,7 +30,6 @@ export default function activate(ctx: ScalpelPluginContext): void {
       ctx.log('well-tiers: PoE not focused')
       return
     }
-    // Immediate feedback during the OCR pass.
     await ctx.storage.set('lastFire', {
       token: `reading-${Date.now()}`,
       firedAt: Date.now(),
@@ -42,14 +44,20 @@ export default function activate(ctx: ScalpelPluginContext): void {
     const boundary = findOptionsBoundary(lines)
     const optionLines = boundary == null ? lines : lines.filter((l) => l.box.y > boundary)
     const options = extractOptions(map, optionLines)
-    const items: Label[] = options.map(({ box, result: r }) => ({
+
+    // Position each label, then line them all up at one column (the box's left border)
+    // and vertically center on each option's row.
+    const placed = options.map(({ box, result: r }) => ({
       x: frame.origin.x + box.x / frame.scale,
-      y: frame.origin.y + box.y / frame.scale,
+      y: frame.origin.y + (box.y + box.h / 2) / frame.scale,
       text: r.aboveTop ? '>=T1?' : `T${r.count - r.rank + 1}/${r.count}`,
       top: r.rank === r.count,
     }))
+    const columnX = placed.length ? Math.min(...placed.map((p) => p.x)) - COLUMN_OFFSET : 0
+    const items: Label[] = placed.map((p) => ({ ...p, x: columnX }))
+
     await ctx.storage.set('lastFire', { token: String(Date.now()), firedAt: Date.now(), items } satisfies Fire)
-    ctx.log(`well-tiers: base=${base ?? 'unknown'}, ${items.length} tiers from ${lines.length} lines`)
+    ctx.log(`well-tiers: base=${base ?? 'unknown'}, ${items.length} tiers`)
   })
 
   ctx.registerOverlay({ mode: 'annotation', title: 'Well Tiers' }, (container) => {
@@ -62,9 +70,9 @@ export default function activate(ctx: ScalpelPluginContext): void {
       for (const it of items) {
         const el = document.createElement('div')
         el.textContent = it.text
-        el.style.cssText = `position:absolute;left:${it.x}px;top:${it.y}px;transform:translateX(-110%);font:bold 16px sans-serif;color:${
-          it.top ? '#ffd24a' : '#cfd8dc'
-        };text-shadow:0 0 3px #000,0 0 3px #000;pointer-events:none`
+        el.style.cssText = `position:absolute;left:${it.x}px;top:${it.y}px;transform:translate(-50%,-50%);font:bold 15px sans-serif;color:${
+          it.top ? '#ffd24a' : '#e2e8f0'
+        };background:rgba(0,0,0,0.82);padding:1px 6px;border-radius:3px;white-space:nowrap;pointer-events:none`
         container.appendChild(el)
       }
     }
@@ -74,11 +82,10 @@ export default function activate(ctx: ScalpelPluginContext): void {
       try {
         r = await ctx.storage.get<Fire>('lastFire')
       } catch {
-        return // transient read failure: keep what's on screen, never clear on noise
+        return
       }
       if (r && r.token !== drawnToken) {
         drawnToken = r.token
-        // Don't let an empty re-capture wipe good labels that are still fresh.
         if (r.items.length === 0 && current && current.length > 0 && Date.now() < clearAt) return
         current = r.items
         clearAt = r.firedAt + CLEAR_MS
@@ -88,7 +95,7 @@ export default function activate(ctx: ScalpelPluginContext): void {
         current = null
         container.innerHTML = ''
       } else if (current && container.childElementCount === 0) {
-        draw(current) // host wiped the surface while we should be visible: restore
+        draw(current)
       }
     }
 
