@@ -23,6 +23,7 @@ interface Diag {
 interface Fire {
   token: string
   firedAt: number
+  open: boolean
   items: Label[]
   diag: Diag
 }
@@ -30,7 +31,7 @@ interface Fire {
 const COLUMN_OFFSET = 40
 const SCOUT_W = 1300
 const READ_W = 2600
-const CLOSE_DWELL_MS = 300
+const EMPTY_DIAG: Diag = { loading: false, base: null, mods: [], note: null }
 
 const prettyRead = (t: string): string =>
   t
@@ -39,61 +40,79 @@ const prettyRead = (t: string): string =>
     .trim()
     .slice(0, 48)
 
-const setFire = (ctx: ScalpelPluginContext, items: Label[], diag: Diag): Promise<void> =>
-  ctx.storage.set('lastFire', { token: String(Date.now()), firedAt: Date.now(), items, diag } satisfies Fire)
+const setFire = (ctx: ScalpelPluginContext, open: boolean, items: Label[], diag: Diag): Promise<void> =>
+  ctx.storage.set('lastFire', { token: String(Date.now()), firedAt: Date.now(), open, items, diag } satisfies Fire)
 
 export default function activate(ctx: ScalpelPluginContext): void {
   if (ctx.getPoeVersion() !== 2) return
 
+  let busy = false
+
   ctx.registerHotkey({ label: 'Reveal well tiers' }, async () => {
+    if (busy) return
+    // If something is already on screen, the hotkey just closes it - never
+    // recapture (that would OCR our own labels back into the image).
+    const cur = await ctx.storage.get<Fire>('lastFire')
+    if (cur?.open) {
+      await setFire(ctx, false, [], EMPTY_DIAG)
+      ctx.closeOverlay()
+      return
+    }
+
     const frame: GameCapture | null = await ctx.captureGameWindow()
     if (!frame) {
       ctx.log('well-tiers: PoE not focused')
       return
     }
-    await setFire(ctx, [], { loading: true, base: null, mods: [], note: null })
-    ctx.openOverlay()
+    busy = true
+    try {
+      await setFire(ctx, true, [], { loading: true, base: null, mods: [], note: null })
+      ctx.openOverlay()
 
-    const leftW = frame.width * 0.72
-    const scout = await ocrRegion(frame, { x: 0, y: 0, w: leftW, h: frame.height }, SCOUT_W)
-    const base = detectBaseType(scout.words)
-    const hintY = findOptionsBoundary(scout.lines)
-    if (hintY == null) {
-      ctx.log('well-tiers: well/desecrated screen not detected')
-      await setFire(ctx, [], { loading: false, base, mods: [], note: 'Not at the Well of Souls' })
-      return
+      const leftW = frame.width * 0.72
+      const scout = await ocrRegion(frame, { x: 0, y: 0, w: leftW, h: frame.height }, SCOUT_W)
+      const base = detectBaseType(scout.words)
+      const hintY = findOptionsBoundary(scout.lines)
+      if (hintY == null) {
+        ctx.log('well-tiers: well/desecrated screen not detected')
+        await setFire(ctx, true, [], { loading: false, base, mods: [], note: 'Not at the Well of Souls' })
+        return
+      }
+
+      let confirmY = frame.height
+      for (const l of scout.lines) if (l.text.toUpperCase().includes('CONFIRM')) confirmY = Math.min(confirmY, l.box.y)
+      if (confirmY >= frame.height) confirmY = hintY + frame.height * 0.35
+      const pad = frame.height * 0.012
+
+      const read = await ocrRegion(frame, { x: 0, y: hintY - pad, w: frame.width * 0.62, h: confirmY - hintY + pad * 2 }, READ_W)
+      const map = buildTierMap(base)
+      const options = extractOptions(map, read.lines)
+
+      const placed = options.map(({ box, result: r }) => ({
+        x: frame.origin.x + box.x / frame.scale,
+        y: frame.origin.y + (box.y + box.h / 2) / frame.scale,
+        text: r.aboveTop ? 'T1?' : `T${r.count - r.rank + 1}`,
+        top: r.rank === r.count,
+      }))
+      const columnX = placed.length ? Math.min(...placed.map((p) => p.x)) - COLUMN_OFFSET : 0
+      const items: Label[] = placed.map((p) => ({ ...p, x: columnX }))
+      const mods: DiagMod[] = options.map((o) => ({ tier: o.result.aboveTop ? 'T1?' : `T${o.result.count - o.result.rank + 1}`, text: prettyRead(o.text) }))
+      await setFire(ctx, true, items, { loading: false, base, mods, note: mods.length ? null : 'No options read' })
+      ctx.log(`well-tiers: base=${base ?? 'unknown'}, ${items.length} tiers`)
+    } finally {
+      busy = false
     }
-
-    let confirmY = frame.height
-    for (const l of scout.lines) if (l.text.toUpperCase().includes('CONFIRM')) confirmY = Math.min(confirmY, l.box.y)
-    if (confirmY >= frame.height) confirmY = hintY + frame.height * 0.35
-    const pad = frame.height * 0.012
-
-    const read = await ocrRegion(frame, { x: 0, y: hintY - pad, w: frame.width * 0.62, h: confirmY - hintY + pad * 2 }, READ_W)
-    const map = buildTierMap(base)
-    const options = extractOptions(map, read.lines)
-
-    const placed = options.map(({ box, result: r }) => ({
-      x: frame.origin.x + box.x / frame.scale,
-      y: frame.origin.y + (box.y + box.h / 2) / frame.scale,
-      text: r.aboveTop ? 'T1?' : `T${r.count - r.rank + 1}`,
-      top: r.rank === r.count,
-    }))
-    const columnX = placed.length ? Math.min(...placed.map((p) => p.x)) - COLUMN_OFFSET : 0
-    const items: Label[] = placed.map((p) => ({ ...p, x: columnX }))
-    const mods: DiagMod[] = options.map((o) => ({ tier: o.result.aboveTop ? 'T1?' : `T${o.result.count - o.result.rank + 1}`, text: prettyRead(o.text) }))
-    await setFire(ctx, items, { loading: false, base, mods, note: mods.length ? null : 'No options read' })
-    ctx.log(`well-tiers: base=${base ?? 'unknown'}, ${items.length} tiers`)
   })
 
   ctx.registerOverlay({ mode: 'annotation', title: 'Well Tiers' }, (container) => {
     let drawnToken = ''
-    let dismissed = false
     let current: { items: Label[]; diag: Diag } | null = null
 
-    const dismiss = () => {
-      dismissed = true
+    const close = () => {
+      current = null
       container.innerHTML = ''
+      void setFire(ctx, false, [], EMPTY_DIAG)
+      ctx.closeOverlay()
     }
 
     const drawDiag = (d: Diag) => {
@@ -105,24 +124,23 @@ export default function activate(ctx: ScalpelPluginContext): void {
         'display:flex;align-items:center;justify-content:space-between;gap:8px;padding:3px 6px 3px 10px;font-weight:700;font-size:11px;letter-spacing:0.06em;text-transform:uppercase;color:#c8a96e;background:rgba(0,0,0,0.25);border-bottom:1px solid rgba(56,56,77,0.6)'
       const label = document.createElement('span')
       label.textContent = 'Scalpel OCR'
-      const close = document.createElement('span')
-      close.textContent = '✕'
-      close.title = 'Hover to close'
-      close.style.cssText =
-        'pointer-events:auto;cursor:pointer;padding:1px 6px;border-radius:3px;color:#9e9480;font-size:12px;line-height:1;transition:color 0.1s,background 0.1s'
+      const x = document.createElement('span')
+      x.textContent = '✕'
+      x.title = 'Hover to close'
+      x.style.cssText = 'pointer-events:auto;cursor:pointer;padding:1px 6px;border-radius:3px;color:#9e9480;font-size:12px;line-height:1;transition:color 0.1s,background 0.1s'
       let dwell: ReturnType<typeof setTimeout> | null = null
-      close.addEventListener('mouseenter', () => {
-        close.style.color = '#ef5350'
-        close.style.background = 'rgba(239,83,80,0.15)'
-        dwell = setTimeout(dismiss, CLOSE_DWELL_MS)
+      x.addEventListener('mouseenter', () => {
+        x.style.color = '#ef5350'
+        x.style.background = 'rgba(239,83,80,0.15)'
+        dwell = setTimeout(close, 300)
       })
-      close.addEventListener('mouseleave', () => {
-        close.style.color = '#9e9480'
-        close.style.background = 'transparent'
+      x.addEventListener('mouseleave', () => {
+        x.style.color = '#9e9480'
+        x.style.background = 'transparent'
         if (dwell) clearTimeout(dwell)
         dwell = null
       })
-      title.append(label, close)
+      title.append(label, x)
       panel.appendChild(title)
       const body = document.createElement('div')
       body.style.cssText = 'padding:7px 10px;white-space:pre-wrap'
@@ -155,13 +173,16 @@ export default function activate(ctx: ScalpelPluginContext): void {
       }
       if (!r) return
       if (r.token !== drawnToken) {
-        // A fresh fire: clears the previous and shows the new state (no timeout).
         drawnToken = r.token
-        dismissed = false
-        current = { items: r.items, diag: r.diag }
+        if (r.open) {
+          current = { items: r.items, diag: r.diag }
+          draw(current)
+        } else {
+          current = null
+          container.innerHTML = ''
+        }
+      } else if (current && container.childElementCount === 0) {
         draw(current)
-      } else if (!dismissed && current && container.childElementCount === 0) {
-        draw(current) // host wiped the surface while we should be visible: restore
       }
     }
 
