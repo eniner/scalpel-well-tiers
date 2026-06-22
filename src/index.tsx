@@ -27,10 +27,10 @@ interface Fire {
   diag: Diag
 }
 
-const CLEAR_MS = 20000
 const COLUMN_OFFSET = -5
 const SCOUT_W = 1300
 const READ_W = 2600
+const CLOSE_DWELL_MS = 300
 
 const prettyRead = (t: string): string =>
   t
@@ -88,25 +88,47 @@ export default function activate(ctx: ScalpelPluginContext): void {
 
   ctx.registerOverlay({ mode: 'annotation', title: 'Well Tiers' }, (container) => {
     let drawnToken = ''
-    let clearAt = 0
+    let dismissed = false
     let current: { items: Label[]; diag: Diag } | null = null
+
+    const dismiss = () => {
+      dismissed = true
+      container.innerHTML = ''
+    }
 
     const drawDiag = (d: Diag) => {
       const panel = document.createElement('div')
       panel.style.cssText =
         'position:absolute;left:0;top:8px;min-width:190px;max-width:320px;background:rgba(23,24,33,0.97);color:#e0d8cc;border:1px solid rgba(56,56,77,0.7);border-left:none;border-radius:0 8px 8px 0;font:12px/1.45 system-ui,sans-serif;box-shadow:0 2px 10px rgba(0,0,0,0.5);overflow:hidden;pointer-events:none'
       const title = document.createElement('div')
-      title.textContent = 'Scalpel OCR'
-      title.style.cssText = 'padding:4px 10px;font-weight:700;font-size:11px;letter-spacing:0.06em;text-transform:uppercase;color:#c8a96e;background:rgba(0,0,0,0.25);border-bottom:1px solid rgba(56,56,77,0.6)'
+      title.style.cssText =
+        'display:flex;align-items:center;justify-content:space-between;gap:8px;padding:3px 6px 3px 10px;font-weight:700;font-size:11px;letter-spacing:0.06em;text-transform:uppercase;color:#c8a96e;background:rgba(0,0,0,0.25);border-bottom:1px solid rgba(56,56,77,0.6)'
+      const label = document.createElement('span')
+      label.textContent = 'Scalpel OCR'
+      const close = document.createElement('span')
+      close.textContent = '✕'
+      close.title = 'Hover to close'
+      close.style.cssText =
+        'pointer-events:auto;cursor:pointer;padding:1px 6px;border-radius:3px;color:#9e9480;font-size:12px;line-height:1;transition:color 0.1s,background 0.1s'
+      let dwell: ReturnType<typeof setTimeout> | null = null
+      close.addEventListener('mouseenter', () => {
+        close.style.color = '#ef5350'
+        close.style.background = 'rgba(239,83,80,0.15)'
+        dwell = setTimeout(dismiss, CLOSE_DWELL_MS)
+      })
+      close.addEventListener('mouseleave', () => {
+        close.style.color = '#9e9480'
+        close.style.background = 'transparent'
+        if (dwell) clearTimeout(dwell)
+        dwell = null
+      })
+      title.append(label, close)
       panel.appendChild(title)
       const body = document.createElement('div')
       body.style.cssText = 'padding:7px 10px;white-space:pre-wrap'
       if (d.loading) body.textContent = 'loading...'
       else if (d.note) body.textContent = `${d.base ? `Base: ${d.base}\n` : ''}${d.note}`
-      else {
-        const lines = [`Base: ${d.base ?? '(unknown)'}`, ...d.mods.map((m) => `${m.tier} - ${m.text}`)]
-        body.textContent = lines.join('\n')
-      }
+      else body.textContent = [`Base: ${d.base ?? '(unknown)'}`, ...d.mods.map((m) => `${m.tier} - ${m.text}`)].join('\n')
       panel.appendChild(body)
       container.appendChild(panel)
     }
@@ -131,17 +153,15 @@ export default function activate(ctx: ScalpelPluginContext): void {
       } catch {
         return
       }
-      if (r && r.token !== drawnToken) {
+      if (!r) return
+      if (r.token !== drawnToken) {
+        // A fresh fire: clears the previous and shows the new state (no timeout).
         drawnToken = r.token
+        dismissed = false
         current = { items: r.items, diag: r.diag }
-        clearAt = r.firedAt + CLEAR_MS
         draw(current)
-      } else if (clearAt && Date.now() > clearAt) {
-        clearAt = 0
-        current = null
-        container.innerHTML = ''
-      } else if (current && container.childElementCount === 0) {
-        draw(current)
+      } else if (!dismissed && current && container.childElementCount === 0) {
+        draw(current) // host wiped the surface while we should be visible: restore
       }
     }
 
