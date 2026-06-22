@@ -28,7 +28,9 @@ interface Fire {
   diag: Diag
 }
 
-const COLUMN_OFFSET = 40
+// Label column X as a fraction of the game width from the left edge (the well box
+// sits at a fixed screen position, so this is stable regardless of OCR).
+const LABEL_COLUMN_FRAC = 0.14
 const SCOUT_W = 1300
 const READ_W = 2600
 const EMPTY_DIAG: Diag = { loading: false, base: null, mods: [], note: null }
@@ -88,14 +90,13 @@ export default function activate(ctx: ScalpelPluginContext): void {
       const map = buildTierMap(base)
       const options = extractOptions(map, read.lines)
 
-      const placed = options.map(({ box, result: r }) => ({
-        x: frame.origin.x + box.x / frame.scale,
+      const columnX = frame.origin.x + frame.gameSize.width * LABEL_COLUMN_FRAC
+      const items: Label[] = options.map(({ box, result: r }) => ({
+        x: columnX,
         y: frame.origin.y + (box.y + box.h / 2) / frame.scale,
         text: r.aboveTop ? 'T1?' : `T${r.count - r.rank + 1}`,
         top: r.rank === r.count,
       }))
-      const columnX = placed.length ? Math.min(...placed.map((p) => p.x)) - COLUMN_OFFSET : 0
-      const items: Label[] = placed.map((p) => ({ ...p, x: columnX }))
       const mods: DiagMod[] = options.map((o) => ({ tier: o.result.aboveTop ? 'T1?' : `T${o.result.count - o.result.rank + 1}`, text: prettyRead(o.text) }))
       await setFire(ctx, true, items, { loading: false, base, mods, note: mods.length ? null : 'No options read' })
       ctx.log(`well-tiers: base=${base ?? 'unknown'}, ${items.length} tiers`)
