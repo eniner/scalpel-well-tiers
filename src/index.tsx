@@ -2,7 +2,7 @@ import type { GameCapture, ScalpelPluginContext } from '@scalpelpoe/plugin-sdk'
 import { buildTierMap } from './dataset'
 import { detectBaseType } from './detect'
 import { extractOptions, findOptionsBoundary } from './match'
-import { runOcr } from './ocr'
+import { ocrRegion } from './ocr'
 
 interface Label {
   x: number
@@ -17,9 +17,15 @@ interface Fire {
 }
 
 const CLEAR_MS = 20000
-// How far left of the leftmost option text (CSS px) to seat the label column, so it
-// lands on the well box's left border rather than overlapping the mod text.
+// How far left of the leftmost option text (CSS px) to seat the label column.
 const COLUMN_OFFSET = -5
+// Scout pass: low-res OCR of the left side to find the item + the options region.
+const SCOUT_W = 1300
+// Read pass: high-res OCR of just the options strip (big text -> stable, complete).
+const READ_W = 2600
+
+const setFire = (ctx: ScalpelPluginContext, items: Label[]): Promise<void> =>
+  ctx.storage.set('lastFire', { token: String(Date.now()), firedAt: Date.now(), items } satisfies Fire)
 
 export default function activate(ctx: ScalpelPluginContext): void {
   if (ctx.getPoeVersion() !== 2) return
@@ -37,16 +43,29 @@ export default function activate(ctx: ScalpelPluginContext): void {
     } satisfies Fire)
     ctx.openOverlay()
 
-    const { words, lines } = await runOcr(frame)
-    const base = detectBaseType(words)
-    const map = buildTierMap(base)
-    // Keep only the desecrated options (below the reveal hint); skip the item's existing tooltip mods.
-    const boundary = findOptionsBoundary(lines)
-    const optionLines = boundary == null ? lines : lines.filter((l) => l.box.y > boundary)
-    const options = extractOptions(map, optionLines)
+    // Pass 1 (scout): is this the well with an item, and where are the options?
+    const leftW = frame.width * 0.72
+    const scout = await ocrRegion(frame, { x: 0, y: 0, w: leftW, h: frame.height }, SCOUT_W)
+    const base = detectBaseType(scout.words)
+    const hintY = findOptionsBoundary(scout.lines)
+    if (hintY == null) {
+      // The "...reveal the Desecrated Modifier" hint isn't here -> not the well screen.
+      ctx.log('well-tiers: well/desecrated screen not detected')
+      await setFire(ctx, [])
+      return
+    }
 
-    // Position each label, then line them all up at one column (the box's left border)
-    // and vertically center on each option's row.
+    // The options sit between the hint and the CONFIRM button.
+    let confirmY = frame.height
+    for (const l of scout.lines) if (l.text.toUpperCase().includes('CONFIRM')) confirmY = Math.min(confirmY, l.box.y)
+    if (confirmY >= frame.height) confirmY = hintY + frame.height * 0.35
+    const pad = frame.height * 0.012
+
+    // Pass 2 (read): high-res OCR of just the options strip.
+    const read = await ocrRegion(frame, { x: 0, y: hintY - pad, w: frame.width * 0.62, h: confirmY - hintY + pad * 2 }, READ_W)
+    const map = buildTierMap(base)
+    const options = extractOptions(map, read.lines)
+
     const placed = options.map(({ box, result: r }) => ({
       x: frame.origin.x + box.x / frame.scale,
       y: frame.origin.y + (box.y + box.h / 2) / frame.scale,
@@ -55,8 +74,7 @@ export default function activate(ctx: ScalpelPluginContext): void {
     }))
     const columnX = placed.length ? Math.min(...placed.map((p) => p.x)) - COLUMN_OFFSET : 0
     const items: Label[] = placed.map((p) => ({ ...p, x: columnX }))
-
-    await ctx.storage.set('lastFire', { token: String(Date.now()), firedAt: Date.now(), items } satisfies Fire)
+    await setFire(ctx, items)
     ctx.log(`well-tiers: base=${base ?? 'unknown'}, ${items.length} tiers`)
   })
 
@@ -86,7 +104,6 @@ export default function activate(ctx: ScalpelPluginContext): void {
       }
       if (r && r.token !== drawnToken) {
         drawnToken = r.token
-        if (r.items.length === 0 && current && current.length > 0 && Date.now() < clearAt) return
         current = r.items
         clearAt = r.firedAt + CLEAR_MS
         draw(current)
@@ -94,7 +111,7 @@ export default function activate(ctx: ScalpelPluginContext): void {
         clearAt = 0
         current = null
         container.innerHTML = ''
-      } else if (current && container.childElementCount === 0) {
+      } else if (current && current.length > 0 && container.childElementCount === 0) {
         draw(current)
       }
     }

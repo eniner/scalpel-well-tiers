@@ -14,26 +14,31 @@ interface Frame {
   width: number
   height: number
 }
+export interface Region {
+  x: number
+  y: number
+  w: number
+  h: number
+}
 export interface OcrResult {
   words: Word[]
   lines: Line[]
 }
 
-// Crop to the left portion (the well dialog + item tooltip live here; the inventory
-// panel on the right is dropped - less to OCR and no false matches from item names).
-const CROP_W_FRAC = 0.72
-// Cap the OCR raster width so a 4K capture isn't 10s of tesseract; ~2000px keeps
-// the well text legible while staying fast.
-const TARGET_W = 2000
+type TW = { text: string; confidence: number; bbox: { x0: number; y0: number; x1: number; y1: number } }
 
-/** Crop + downscale + grayscale-normalize the captured frame, OCR it, and return
- *  both words (for base detection) and tesseract's native lines (for option
- *  matching). All boxes are mapped back to original frame px. */
-export async function runOcr(frame: Frame): Promise<OcrResult> {
-  const cropW = Math.max(1, Math.round(frame.width * CROP_W_FRAC))
-  const ocrScale = Math.min(2, Math.max(0.5, TARGET_W / cropW))
-  const outW = Math.max(1, Math.round(cropW * ocrScale))
-  const outH = Math.max(1, Math.round(frame.height * ocrScale))
+/** Crop the captured frame to `region`, scale it so its width is ~`targetW`, grayscale-
+ *  normalize, and OCR. Returns words (for base detection) and tesseract's native lines
+ *  (for option matching), with all boxes mapped back to original frame px. Cropping to
+ *  the option strip and scaling it UP keeps the mod text large and the OCR stable. */
+export async function ocrRegion(frame: Frame, region: Region, targetW: number): Promise<OcrResult> {
+  const rx = Math.max(0, Math.round(region.x))
+  const ry = Math.max(0, Math.round(region.y))
+  const rw = Math.max(1, Math.min(Math.round(region.w), frame.width - rx))
+  const rh = Math.max(1, Math.min(Math.round(region.h), frame.height - ry))
+  const scale = Math.min(3, Math.max(0.5, targetW / rw))
+  const outW = Math.max(1, Math.round(rw * scale))
+  const outH = Math.max(1, Math.round(rh * scale))
 
   const full = document.createElement('canvas')
   full.width = frame.width
@@ -48,7 +53,7 @@ export async function runOcr(frame: Frame): Promise<OcrResult> {
   const octx = out.getContext('2d')
   if (!octx) return { words: [], lines: [] }
   octx.imageSmoothingEnabled = true
-  octx.drawImage(full, 0, 0, cropW, frame.height, 0, 0, outW, outH)
+  octx.drawImage(full, rx, ry, rw, rh, 0, 0, outW, outH)
 
   const img = octx.getImageData(0, 0, outW, outH)
   let lo = 255
@@ -72,20 +77,17 @@ export async function runOcr(frame: Frame): Promise<OcrResult> {
 
   const worker = await getWorker()
   const { data } = await worker.recognize(out, {}, { blocks: true })
-  const inv = 1 / ocrScale
-  type TW = { text: string; confidence: number; bbox: { x0: number; y0: number; x1: number; y1: number } }
-  type TL = { words?: TW[] }
-  const d = data as unknown as { words?: TW[]; lines?: TL[] }
+  const inv = 1 / scale
+  const fx = (x: number) => rx + x * inv
+  const fy = (y: number) => ry + y * inv
+  const d = data as unknown as { words?: TW[]; lines?: { words?: TW[] }[] }
   const words: Word[] = (d.words ?? []).map((w) => ({
     text: w.text,
     confidence: w.confidence,
-    bbox: { x0: w.bbox.x0 * inv, y0: w.bbox.y0 * inv, x1: w.bbox.x1 * inv, y1: w.bbox.y1 * inv },
+    bbox: { x0: fx(w.bbox.x0), y0: fy(w.bbox.y0), x1: fx(w.bbox.x1), y1: fy(w.bbox.y1) },
   }))
   const lines: Line[] = []
   for (const l of d.lines ?? []) {
-    // Build text AND the box from the high-confidence words only. The tesseract
-    // line bbox spans the dialog's decorative border art; the kept words are the
-    // actual mod text, so their union box positions the label correctly.
     const kept = (l.words ?? []).filter((w) => w.confidence >= 55)
     const text = kept
       .map((w) => w.text)
@@ -93,11 +95,15 @@ export async function runOcr(frame: Frame): Promise<OcrResult> {
       .replace(/\s+/g, ' ')
       .trim()
     if (!text) continue
-    const x0 = Math.min(...kept.map((w) => w.bbox.x0))
-    const y0 = Math.min(...kept.map((w) => w.bbox.y0))
-    const x1 = Math.max(...kept.map((w) => w.bbox.x1))
-    const y1 = Math.max(...kept.map((w) => w.bbox.y1))
-    lines.push({ text, box: { x: x0 * inv, y: y0 * inv, w: (x1 - x0) * inv, h: (y1 - y0) * inv } })
+    // Position the box from real words only (>=2 alphanumerics), so far-left
+    // decorative-border junk chars do not drag the box (and the label column) left.
+    const real = kept.filter((w) => w.text.replace(/[^A-Za-z0-9]/g, "").length >= 2)
+    const bw = real.length ? real : kept
+    const x0 = Math.min(...bw.map((w) => fx(w.bbox.x0)))
+    const y0 = Math.min(...bw.map((w) => fy(w.bbox.y0)))
+    const x1 = Math.max(...bw.map((w) => fx(w.bbox.x1)))
+    const y1 = Math.max(...bw.map((w) => fy(w.bbox.y1)))
+    lines.push({ text, box: { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } })
   }
   return { words, lines }
 }
