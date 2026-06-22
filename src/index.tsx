@@ -204,7 +204,7 @@ export default function activate(ctx: ScalpelPluginContext): void {
     }
   })
 
-  ctx.registerOverlay({ mode: 'annotation', title: 'Well Tiers' }, (container) => {
+  ctx.registerOverlay({ mode: 'annotation', title: 'Scalpel OCR' }, (container) => {
     let drawnToken = ''
     let current: { items: Label[]; diag: Diag } | null = null
 
