@@ -22,12 +22,32 @@ export function valueToTier(tiers: Tier[], value: number): Tier {
   return chosen
 }
 
-export function resolveTier(map: Map<string, Tier[]>, text: string, value: number): TierResult | null {
-  const tiers = map.get(normKey(text))
-  if (!tiers || tiers.length === 0) return null
+/** Of several candidate ladders for one mod text, pick the one the value best fits:
+ *  prefer a ladder whose range actually contains the value, then the more granular. */
+export function pickLadder(ladders: Tier[][], value: number): Tier[] {
+  let best = ladders[0]
+  let bestScore = -1
+  for (const l of ladders) {
+    const inRange = value >= l[0].min && value <= l[l.length - 1].max ? 1 : 0
+    const score = inRange * 1000 + l.length
+    if (score > bestScore) {
+      bestScore = score
+      best = l
+    }
+  }
+  return best
+}
+
+function toResult(tiers: Tier[], value: number): TierResult {
   const tier = valueToTier(tiers, value)
   const rank = tiers.indexOf(tier) + 1
   return { rank, count: tiers.length, tier, aboveTop: value > tiers[tiers.length - 1].max }
+}
+
+export function resolveTier(map: Map<string, Tier[][]>, text: string, value: number): TierResult | null {
+  const ladders = map.get(normKey(text))
+  if (!ladders || ladders.length === 0) return null
+  return toResult(pickLadder(ladders, value), value)
 }
 
 // Drop decorative-border OCR junk (brackets, currency/symbol glyphs) flanking the
@@ -48,15 +68,13 @@ function unionBox(a: Box, b: Box): Box {
  * Match OCR lines against the tier vocabulary. For each line carrying a value, find
  * the LONGEST known mod key that is a substring of the cleaned+normalized line, and
  * also of the line joined with its same-column wrap continuation; keep whichever is
- * longer. Then collapse fragments of the same mod (one match's key being a substring
- * of a nearby, x-overlapping match's key) so a wrapped option yields a single label.
- * The known vocabulary is the filter - UI noise matches nothing.
+ * longer. Then collapse fragments of the same mod. UI noise matches nothing.
  */
-export function extractOptions(map: Map<string, Tier[]>, lines: Line[]): OptionTier[] {
+export function extractOptions(map: Map<string, Tier[][]>, lines: Line[]): OptionTier[] {
   const keys = [...map.keys()].sort((a, b) => b.length - a.length)
   const longestKey = (text: string): string | null => {
     const nk = normKey(clean(text))
-    for (const k of keys) if (k.length >= 12 && nk.includes(k)) return k // keys sorted desc -> first hit is longest
+    for (const k of keys) if (k.length >= 12 && nk.includes(k)) return k
     return null
   }
   const out: OptionTier[] = []
@@ -82,15 +100,10 @@ export function extractOptions(map: Map<string, Tier[]>, lines: Line[]): OptionT
       }
     }
     if (!key) continue
-    const tiers = map.get(key)
-    if (!tiers) continue
-    const tier = valueToTier(tiers, value)
-    const rank = tiers.indexOf(tier) + 1
-    out.push({ box, key, text, result: { rank, count: tiers.length, tier, aboveTop: value > tiers[tiers.length - 1].max } })
+    const ladders = map.get(key)
+    if (!ladders) continue
+    out.push({ box, key, text, result: toResult(pickLadder(ladders, value), value) })
   }
-  // Collapse same-mod fragments: a long wrapped mod (or a double OCR read) can yield
-  // several partial matches whose keys are substrings of each other. Keep the
-  // longest-key one; distinct mods (unrelated keys) are never merged.
   const deduped: OptionTier[] = []
   for (const o of [...out].sort((a, b) => b.key.length - a.key.length)) {
     const dup = deduped.some(
@@ -106,10 +119,8 @@ export function extractOptions(map: Map<string, Tier[]>, lines: Line[]): OptionT
 
 /**
  * The well's "...reveal the Desecrated Modifier" hint line sits between the item's
- * existing mods (above) and the desecrated options the player can add (below).
- * Return the Y below which the options live, or null if the hint isn't found (the
- * tokens DESECRATED / REVEAL / TAKE+ITEM appear only in that hint, never in the
- * "THE WELL OF SOULS" title, so they don't false-anchor on the dialog header).
+ * existing mods (above) and the desecrated options (below). Return the Y below which
+ * the options live, or null if the hint isn't found.
  */
 export function findOptionsBoundary(lines: Line[]): number | null {
   let y: number | null = null
