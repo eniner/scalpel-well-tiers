@@ -10,22 +10,37 @@ interface Label {
   text: string
   top: boolean
 }
+interface DiagMod {
+  tier: string
+  text: string
+}
+interface Diag {
+  loading: boolean
+  base: string | null
+  mods: DiagMod[]
+  note: string | null
+}
 interface Fire {
   token: string
   firedAt: number
   items: Label[]
+  diag: Diag
 }
 
 const CLEAR_MS = 20000
-// How far left of the leftmost option text (CSS px) to seat the label column.
 const COLUMN_OFFSET = -5
-// Scout pass: low-res OCR of the left side to find the item + the options region.
 const SCOUT_W = 1300
-// Read pass: high-res OCR of just the options strip (big text -> stable, complete).
 const READ_W = 2600
 
-const setFire = (ctx: ScalpelPluginContext, items: Label[]): Promise<void> =>
-  ctx.storage.set('lastFire', { token: String(Date.now()), firedAt: Date.now(), items } satisfies Fire)
+const prettyRead = (t: string): string =>
+  t
+    .replace(/[^A-Za-z0-9 %+().,-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 48)
+
+const setFire = (ctx: ScalpelPluginContext, items: Label[], diag: Diag): Promise<void> =>
+  ctx.storage.set('lastFire', { token: String(Date.now()), firedAt: Date.now(), items, diag } satisfies Fire)
 
 export default function activate(ctx: ScalpelPluginContext): void {
   if (ctx.getPoeVersion() !== 2) return
@@ -36,32 +51,24 @@ export default function activate(ctx: ScalpelPluginContext): void {
       ctx.log('well-tiers: PoE not focused')
       return
     }
-    await ctx.storage.set('lastFire', {
-      token: `reading-${Date.now()}`,
-      firedAt: Date.now(),
-      items: [{ x: frame.origin.x + frame.gameSize.width * 0.32, y: frame.origin.y + frame.gameSize.height * 0.28, text: 'reading tiers...', top: false }],
-    } satisfies Fire)
+    await setFire(ctx, [], { loading: true, base: null, mods: [], note: null })
     ctx.openOverlay()
 
-    // Pass 1 (scout): is this the well with an item, and where are the options?
     const leftW = frame.width * 0.72
     const scout = await ocrRegion(frame, { x: 0, y: 0, w: leftW, h: frame.height }, SCOUT_W)
     const base = detectBaseType(scout.words)
     const hintY = findOptionsBoundary(scout.lines)
     if (hintY == null) {
-      // The "...reveal the Desecrated Modifier" hint isn't here -> not the well screen.
       ctx.log('well-tiers: well/desecrated screen not detected')
-      await setFire(ctx, [])
+      await setFire(ctx, [], { loading: false, base, mods: [], note: 'Not at the Well of Souls' })
       return
     }
 
-    // The options sit between the hint and the CONFIRM button.
     let confirmY = frame.height
     for (const l of scout.lines) if (l.text.toUpperCase().includes('CONFIRM')) confirmY = Math.min(confirmY, l.box.y)
     if (confirmY >= frame.height) confirmY = hintY + frame.height * 0.35
     const pad = frame.height * 0.012
 
-    // Pass 2 (read): high-res OCR of just the options strip.
     const read = await ocrRegion(frame, { x: 0, y: hintY - pad, w: frame.width * 0.62, h: confirmY - hintY + pad * 2 }, READ_W)
     const map = buildTierMap(base)
     const options = extractOptions(map, read.lines)
@@ -74,18 +81,40 @@ export default function activate(ctx: ScalpelPluginContext): void {
     }))
     const columnX = placed.length ? Math.min(...placed.map((p) => p.x)) - COLUMN_OFFSET : 0
     const items: Label[] = placed.map((p) => ({ ...p, x: columnX }))
-    await setFire(ctx, items)
+    const mods: DiagMod[] = options.map((o) => ({ tier: o.result.aboveTop ? 'T1?' : `T${o.result.count - o.result.rank + 1}`, text: prettyRead(o.text) }))
+    await setFire(ctx, items, { loading: false, base, mods, note: mods.length ? null : 'No options read' })
     ctx.log(`well-tiers: base=${base ?? 'unknown'}, ${items.length} tiers`)
   })
 
   ctx.registerOverlay({ mode: 'annotation', title: 'Well Tiers' }, (container) => {
     let drawnToken = ''
     let clearAt = 0
-    let current: Label[] | null = null
+    let current: { items: Label[]; diag: Diag } | null = null
 
-    const draw = (items: Label[]) => {
+    const drawDiag = (d: Diag) => {
+      const panel = document.createElement('div')
+      panel.style.cssText =
+        'position:absolute;left:0;top:8px;min-width:190px;max-width:320px;background:rgba(23,24,33,0.97);color:#e0d8cc;border:1px solid rgba(56,56,77,0.7);border-left:none;border-radius:0 8px 8px 0;font:12px/1.45 system-ui,sans-serif;box-shadow:0 2px 10px rgba(0,0,0,0.5);overflow:hidden;pointer-events:none'
+      const title = document.createElement('div')
+      title.textContent = 'Scalpel OCR'
+      title.style.cssText = 'padding:4px 10px;font-weight:700;font-size:11px;letter-spacing:0.06em;text-transform:uppercase;color:#c8a96e;background:rgba(0,0,0,0.25);border-bottom:1px solid rgba(56,56,77,0.6)'
+      panel.appendChild(title)
+      const body = document.createElement('div')
+      body.style.cssText = 'padding:7px 10px;white-space:pre-wrap'
+      if (d.loading) body.textContent = 'loading...'
+      else if (d.note) body.textContent = `${d.base ? `Base: ${d.base}\n` : ''}${d.note}`
+      else {
+        const lines = [`Base: ${d.base ?? '(unknown)'}`, ...d.mods.map((m) => `${m.tier} - ${m.text}`)]
+        body.textContent = lines.join('\n')
+      }
+      panel.appendChild(body)
+      container.appendChild(panel)
+    }
+
+    const draw = (state: { items: Label[]; diag: Diag }) => {
       container.innerHTML = ''
-      for (const it of items) {
+      drawDiag(state.diag)
+      for (const it of state.items) {
         const el = document.createElement('div')
         el.textContent = it.text
         el.style.cssText = `position:absolute;left:${it.x}px;top:${it.y}px;transform:translate(-50%,-50%);font:bold 15px sans-serif;color:${
@@ -104,14 +133,14 @@ export default function activate(ctx: ScalpelPluginContext): void {
       }
       if (r && r.token !== drawnToken) {
         drawnToken = r.token
-        current = r.items
+        current = { items: r.items, diag: r.diag }
         clearAt = r.firedAt + CLEAR_MS
         draw(current)
       } else if (clearAt && Date.now() > clearAt) {
         clearAt = 0
         current = null
         container.innerHTML = ''
-      } else if (current && current.length > 0 && container.childElementCount === 0) {
+      } else if (current && container.childElementCount === 0) {
         draw(current)
       }
     }

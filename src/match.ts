@@ -12,6 +12,7 @@ export interface OptionTier {
   box: Box
   result: TierResult
   key: string
+  text: string
 }
 
 /** Highest tier whose min <= value; clamps to the lowest tier below the floor. Ascending input. */
@@ -64,6 +65,7 @@ export function extractOptions(map: Map<string, Tier[]>, lines: Line[]): OptionT
     if (value == null) continue
     let key = longestKey(lines[i].text)
     let box = lines[i].box
+    let text = lines[i].text
     const below = lines.find(
       (l, j) =>
         j !== i &&
@@ -76,6 +78,7 @@ export function extractOptions(map: Map<string, Tier[]>, lines: Line[]): OptionT
       if (joined && (!key || joined.length > key.length)) {
         key = joined
         box = unionBox(lines[i].box, below.box)
+        text = `${lines[i].text} ${below.text}`
       }
     }
     if (!key) continue
@@ -83,7 +86,7 @@ export function extractOptions(map: Map<string, Tier[]>, lines: Line[]): OptionT
     if (!tiers) continue
     const tier = valueToTier(tiers, value)
     const rank = tiers.indexOf(tier) + 1
-    out.push({ box, key, result: { rank, count: tiers.length, tier, aboveTop: value > tiers[tiers.length - 1].max } })
+    out.push({ box, key, text, result: { rank, count: tiers.length, tier, aboveTop: value > tiers[tiers.length - 1].max } })
   }
   // Collapse same-mod fragments: a long wrapped mod (or a double OCR read) can yield
   // several partial matches whose keys are substrings of each other. Keep the
