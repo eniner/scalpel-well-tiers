@@ -6,6 +6,6 @@
   "description": "Adds the ability to set a hotkey that uses OCR to display tiers at the Well of Souls. More, eventually.",
   "author": "scalpelpoe",
   "homepage": "https://github.com/scalpelpoe/scalpel-well-tiers",
-  "scalpelMinVersion": ">=0.9.15",
+  "scalpelMinVersion": ">=0.9.16-rc1",
   "poeVersions": [2]
 }
