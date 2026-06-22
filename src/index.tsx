@@ -27,7 +27,7 @@ interface Fire {
   diag: Diag
 }
 
-const COLUMN_OFFSET = -5
+const COLUMN_OFFSET = 40
 const SCOUT_W = 1300
 const READ_W = 2600
 const CLOSE_DWELL_MS = 300

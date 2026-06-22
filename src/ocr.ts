@@ -95,9 +95,9 @@ export async function ocrRegion(frame: Frame, region: Region, targetW: number): 
       .replace(/\s+/g, ' ')
       .trim()
     if (!text) continue
-    // Position the box from real words only (>=2 alphanumerics), so far-left
+    // Position the box from real words only (>=3 alphanumerics), so far-left
     // decorative-border junk chars do not drag the box (and the label column) left.
-    const real = kept.filter((w) => w.text.replace(/[^A-Za-z0-9]/g, "").length >= 2)
+    const real = kept.filter((w) => w.text.replace(/[^A-Za-z0-9]/g, "").length >= 3)
     const bw = real.length ? real : kept
     const x0 = Math.min(...bw.map((w) => fx(w.bbox.x0)))
     const y0 = Math.min(...bw.map((w) => fy(w.bbox.y0)))
