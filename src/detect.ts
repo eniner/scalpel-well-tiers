@@ -7,8 +7,9 @@ export interface BaseMatch {
 }
 
 /** Levenshtein distance between a and b, early-exiting once the running minimum
- *  exceeds `max` (returns max+1). Length-difference shortcut keeps it cheap. */
-function lev(a: string, b: string, max: number): number {
+ *  exceeds `max` (returns max+1). Length-difference shortcut keeps it cheap.
+ *  Exported so the reward-price fuzzy matcher (rewards.ts) reuses it. */
+export function lev(a: string, b: string, max: number): number {
   if (Math.abs(a.length - b.length) > max) return max + 1
   const dp = Array.from({ length: b.length + 1 }, (_, j) => j)
   for (let i = 1; i <= a.length; i++) {

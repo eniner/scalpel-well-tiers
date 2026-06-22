@@ -3,9 +3,17 @@ import { baseIconUrl, buildTierMap } from './dataset'
 import { detectBaseType, nearestBase } from './detect'
 import { extractOptions, findOptionsBoundary } from './match'
 import { ocrRegion, setOcrProgress, warmWorkers } from './ocr'
+import { buildPriceIndex, parseRewardCandidates, type PricedReward, priceRewards } from './rewards'
 import { SCALPEL_ICON } from './scalpel-icon'
 
+// Which supported screen this fire is for - selects the render path.
+type Mode = 'well' | 'runeshape'
+
 interface Label {
+  // Absolute CSS-px column for the label. Well tier badges omit it (the render
+  // derives the column from the well centre); reward prices set it per the
+  // panel, computed from the OCR row boxes in the handler.
+  x?: number
   y: number
   text: string
   top: boolean
@@ -22,11 +30,14 @@ interface Diag {
   mods: DiagMod[]
   note: string | null
   phase?: string
+  // Runeshape-only status line field.
+  updatedAt?: number | null
 }
 interface Fire {
   token: string
   firedAt: number
   open: boolean
+  mode: Mode
   items: Label[]
   diag: Diag
 }
@@ -52,6 +63,22 @@ const PANEL_TOP_FRAC = 0.08
 const SCOUT_W = 1100
 const READ_W = 2600
 const BASE_W = 1600
+const REWARD_W = 1600
+// The Runeshape Combinations panel is a left-anchored book; PoE UI scales with
+// HEIGHT, so its bounds are height-fractions. Crop the reward read to just the
+// panel - this excludes the FPS overlay, the centre item tooltip, and the quest
+// log, which both speeds the OCR (and lifts quality: a smaller region upscales
+// more at the same target width) and stops their text becoming phantom rewards.
+const REWARD_PANEL_W_FRAC = 0.56
+const REWARD_PANEL_H_FRAC = 0.72
+// Status pill (poe.ninja + freshness) anchor, in the panel header - fractions of
+// game HEIGHT from the top-left, so it tracks the header across resolutions.
+const STATUS_LEFT_FRAC = 0.39
+const STATUS_TOP_FRAC = 0.1
+// Runeshape price column, as a fraction of game HEIGHT from the screen's LEFT
+// edge (the panel is left-mounted and PoE UI scales with height, so this holds
+// across resolutions). Tuned in-game.
+const RS_PRICE_X_FRAC = 0.503
 const EMPTY_DIAG: Diag = { loading: false, base: null, mods: [], note: null }
 
 // Map tesseract's raw status strings to user-facing phase labels. During a
@@ -66,8 +93,8 @@ const prettyStatus = (status: string, step: string): string => {
   return step
 }
 
-const setFire = (ctx: ScalpelPluginContext, open: boolean, items: Label[], diag: Diag): Promise<void> =>
-  ctx.storage.set('lastFire', { token: String(Date.now()), firedAt: Date.now(), open, items, diag } satisfies Fire)
+const setFire = (ctx: ScalpelPluginContext, open: boolean, mode: Mode, items: Label[], diag: Diag): Promise<void> =>
+  ctx.storage.set('lastFire', { token: String(Date.now()), firedAt: Date.now(), open, mode, items, diag } satisfies Fire)
 
 // Minor words kept lowercase in the title-cased affix label (except as word 1).
 const MINOR_WORDS = new Set(['of', 'the', 'on', 'to', 'per', 'with', 'and', 'a', 'an', 'in', 'for'])
@@ -86,6 +113,83 @@ const affixLabel = (key: string): string =>
     .join(' ')
     .replace(/^To\s+/, '')
 
+/** Read the Runeshape Combinations panel, price each "Nx <Item>" reward off the
+ *  host poe.ninja snapshot, and write inline price labels + a status line. `step`
+ *  feeds the OCR progress sink's phase label; `pushPhase` writes the loading line. */
+async function priceRuneshapeRewards(
+  ctx: ScalpelPluginContext,
+  frame: GameCapture,
+  pushPhase: (text: string) => void,
+  setStep: (text: string) => void,
+): Promise<void> {
+  setStep('Reading rewards')
+  pushPhase('Reading rewards...')
+  // Dedicated high-res read of the left panel. The low-res scout misses the
+  // small "Nx" prefixes and the header, so both detection AND parsing run off
+  // THIS pass, not the scout. Quantity is optional in parsing; the price lookup
+  // below is what separates real rewards from the header/FPS noise.
+  const read = await ocrRegion(
+    frame,
+    { x: 0, y: 0, w: frame.height * REWARD_PANEL_W_FRAC, h: frame.height * REWARD_PANEL_H_FRAC },
+    REWARD_W,
+    'block',
+  )
+  const candidates = parseRewardCandidates(read.lines)
+
+  setStep('Pricing rewards')
+  pushPhase('Pricing rewards...')
+  let priced: PricedReward[] = []
+  let updatedAt: number | null = null
+  try {
+    // Pull the guaranteed currency set and the broad snapshot together, so
+    // currency rewards (the common case) always resolve even if the broad set
+    // omits a slug. buildPriceIndex de-dupes by name.
+    const [all, cur] = await Promise.all([ctx.prices.getPrices(), ctx.prices.getPrices({ category: 'currency' })])
+    updatedAt = all.updatedAt ?? cur.updatedAt
+    priced = priceRewards(candidates, buildPriceIndex([...all.prices, ...cur.prices]))
+  } catch (e) {
+    ctx.log(`well-tiers: price fetch failed (${e instanceof Error ? e.message : String(e)})`)
+    // Offline: still show any explicit "Nx" rows as "?" so the screen isn't a
+    // dead end (priceRewards keeps those even with an empty index).
+    priced = priceRewards(candidates, buildPriceIndex([]))
+  }
+
+  // Nothing priced and no explicit reward rows -> this isn't a (readable)
+  // Runeshape screen. Show what the high-res pass read so a miss is diagnosable.
+  if (priced.length === 0) {
+    const sample = read.lines
+      .map((l) => l.text.trim())
+      .filter(Boolean)
+      .slice(0, 8)
+      .join('\n')
+    ctx.log(`well-tiers: no supported screen detected. Read: ${sample.replace(/\n/g, ' | ')}`)
+    await setFire(ctx, true, 'well', [], {
+      loading: false,
+      base: null,
+      mods: [],
+      note: `Not at a supported screen.\n\nScanned text:\n${sample || '(no text read)'}`,
+    })
+    return
+  }
+
+  const maxVal = priced.reduce((m, p) => (p.value != null && p.value > m ? p.value : m), 0)
+  // Only the per-row Y comes from the OCR box; the X column is a single
+  // left-anchored value applied (and tuned) in the overlay render.
+  const items: Label[] = priced.map((p) => ({
+    y: frame.origin.y + (p.box.y + p.box.h / 2) / frame.scale,
+    text: p.text,
+    top: maxVal > 0 && p.value === maxVal,
+  }))
+  await setFire(ctx, true, 'runeshape', items, {
+    loading: false,
+    base: null,
+    mods: [],
+    note: items.length ? null : 'No rewards read',
+    updatedAt,
+  })
+  ctx.log(`well-tiers: runeshape, ${items.length} rewards priced`)
+}
+
 export default function activate(ctx: ScalpelPluginContext): void {
   if (ctx.getPoeVersion() !== 2) return
 
@@ -103,7 +207,7 @@ export default function activate(ctx: ScalpelPluginContext): void {
     // recapture (that would OCR our own labels back into the image).
     const cur = await ctx.storage.get<Fire>('lastFire')
     if (cur?.open) {
-      await setFire(ctx, false, [], EMPTY_DIAG)
+      await setFire(ctx, false, 'well', [], EMPTY_DIAG)
       ctx.closeOverlay()
       return
     }
@@ -119,6 +223,10 @@ export default function activate(ctx: ScalpelPluginContext): void {
     // "loading". Phase writes are throttled (identical text within 150ms is
     // dropped) since tesseract's logger fires far faster than the 250ms poll.
     let step = 'Scanning screen'
+    // Selected once the scout classifies the screen; loading writes before that
+    // default to 'well'. Captured by pushPhase so each phase write tags the
+    // right render path.
+    let mode: Mode = 'well'
     let lastPhaseWrite = 0
     let lastPhaseText = ''
     const pushPhase = (text: string): void => {
@@ -126,7 +234,7 @@ export default function activate(ctx: ScalpelPluginContext): void {
       if (text === lastPhaseText && now - lastPhaseWrite < 150) return
       lastPhaseText = text
       lastPhaseWrite = now
-      void setFire(ctx, true, [], { loading: true, base: null, mods: [], note: null, phase: text })
+      void setFire(ctx, true, mode, [], { loading: true, base: null, mods: [], note: null, phase: text })
     }
     setOcrProgress((status, progress) => {
       const label = prettyStatus(status, step)
@@ -134,17 +242,25 @@ export default function activate(ctx: ScalpelPluginContext): void {
       pushPhase(pct > 0 && pct < 100 ? `${label}... ${pct}%` : `${label}...`)
     })
     try {
-      await setFire(ctx, true, [], { loading: true, base: null, mods: [], note: null, phase: 'Scanning screen...' })
+      await setFire(ctx, true, 'well', [], { loading: true, base: null, mods: [], note: null, phase: 'Scanning screen...' })
       ctx.openOverlay()
 
       const leftW = frame.width * 0.72
       // 'sparse' mode + a lower target width: the scout only needs to locate the
-      // hint/confirm tokens, so it skips full layout analysis over this big region.
+      // well's hint/confirm tokens, so it skips full layout analysis over this
+      // big region. (The Runeshape screen is handled off its own high-res read.)
       const scout = await ocrRegion(frame, { x: 0, y: 0, w: leftW, h: frame.height }, SCOUT_W, 'sparse')
       const hintY = findOptionsBoundary(scout.lines)
+
+      // Not the Well of Souls -> try the Runeshape Combinations panel. The helper
+      // does a dedicated high-res read and self-detects (showing the diagnostic
+      // readout itself if nothing prices), so the low-res scout never has to read
+      // the small reward text or the header.
       if (hintY == null) {
-        ctx.log('well-tiers: well/desecrated screen not detected')
-        await setFire(ctx, true, [], { loading: false, base: null, mods: [], note: 'Not at the Well of Souls' })
+        mode = 'runeshape'
+        await priceRuneshapeRewards(ctx, frame, pushPhase, (text) => {
+          step = text
+        })
         return
       }
 
@@ -196,7 +312,7 @@ export default function activate(ctx: ScalpelPluginContext): void {
         text: affixLabel(o.key),
         top: o.result.rank === o.result.count,
       }))
-      await setFire(ctx, true, items, { loading: false, base: baseLabel, icon: baseIcon, mods, note: mods.length ? null : 'No options read' })
+      await setFire(ctx, true, 'well', items, { loading: false, base: baseLabel, icon: baseIcon, mods, note: mods.length ? null : 'No options read' })
       ctx.log(`well-tiers: base=${base ?? 'unknown'}, ${items.length} tiers`)
     } finally {
       setOcrProgress(null)
@@ -206,7 +322,7 @@ export default function activate(ctx: ScalpelPluginContext): void {
 
   ctx.registerOverlay({ mode: 'annotation', title: 'Scalpel OCR' }, (container) => {
     let drawnToken = ''
-    let current: { items: Label[]; diag: Diag } | null = null
+    let current: { items: Label[]; diag: Diag; mode: Mode } | null = null
 
     // Badge column X: the well dialog's center is the re-centered playfield
     // center (width - sidebar)/2 with the inventory open, offset from there by
@@ -221,8 +337,16 @@ export default function activate(ctx: ScalpelPluginContext): void {
       current = null
       clearInteractive()
       container.innerHTML = ''
-      void setFire(ctx, false, [], EMPTY_DIAG)
+      void setFire(ctx, false, 'well', [], EMPTY_DIAG)
       ctx.closeOverlay()
+    }
+
+    // "4m ago" relative time for the reward price freshness line.
+    const agoText = (ts: number): string => {
+      const mins = Math.max(0, Math.round((Date.now() - ts) / 60000))
+      if (mins < 1) return 'just now'
+      if (mins < 60) return `${mins}m ago`
+      return `${Math.round(mins / 60)}h ago`
     }
 
     // Standard Scalpel chrome: app-logo + "Scalpel OCR" title + a real close
@@ -346,8 +470,48 @@ export default function activate(ctx: ScalpelPluginContext): void {
       return panel
     }
 
-    const draw = (state: { items: Label[]; diag: Diag }) => {
+    // Runeshape rewards: inline price labels next to each row + a small status
+    // pill. No chrome panel (it would cover the game's own panel), so the overlay
+    // stays fully click-through and the hotkey is the only way to dismiss it.
+    const drawRuneshape = (state: { items: Label[]; diag: Diag }) => {
+      clearInteractive()
+      const d = state.diag
+
+      // Price labels all share the left-anchored column (a fraction of the game
+      // height, tuned in-game); only Y comes from each row's OCR box.
+      const colX = Math.round(window.innerHeight * RS_PRICE_X_FRAC)
+      for (const it of state.items) {
+        const el = document.createElement('div')
+        el.textContent = it.text
+        el.style.cssText = `position:absolute;left:${colX}px;top:${it.y}px;transform:translateY(-50%);font:bold 14px sans-serif;color:${
+          it.top ? '#ffd24a' : '#e2e8f0'
+        };background:rgba(0,0,0,0.82);padding:1px 7px;border-radius:3px;white-space:nowrap;pointer-events:none`
+        container.appendChild(el)
+      }
+
+      // Anchor the pill in the panel header (height-fraction from top-left), so it
+      // sits in the empty space beside the "Runeshape Combinations" title and
+      // doesn't move between the loading and result states.
+      const pillLeft = window.innerHeight * STATUS_LEFT_FRAC
+      const pillTop = window.innerHeight * STATUS_TOP_FRAC
+      const pill = document.createElement('div')
+      pill.style.cssText = `position:absolute;left:${pillLeft.toFixed(0)}px;top:${pillTop.toFixed(0)}px;padding:4px 10px;background:rgba(23,24,33,0.96);border:1px solid rgba(56,56,77,0.5);border-radius:8px;color:#9e9480;font:11px system-ui,sans-serif;box-shadow:0 2px 8px rgba(0,0,0,0.5);pointer-events:none;white-space:nowrap`
+      if (d.loading) pill.textContent = d.phase ?? 'Scanning...'
+      else if (d.note) pill.textContent = d.note
+      else {
+        const parts = ['poe.ninja']
+        if (d.updatedAt) parts.push(agoText(d.updatedAt))
+        pill.textContent = parts.join(' · ')
+      }
+      container.appendChild(pill)
+    }
+
+    const draw = (state: { items: Label[]; diag: Diag; mode: Mode }) => {
       container.innerHTML = ''
+      if (state.mode === 'runeshape') {
+        drawRuneshape(state)
+        return
+      }
       const panel = buildPanel(state.diag)
       container.appendChild(panel)
       // Report the panel as the interactive region: the host flips this overlay
@@ -357,11 +521,10 @@ export default function activate(ctx: ScalpelPluginContext): void {
       const r = panel.getBoundingClientRect()
       ctx.setInteractiveRegion({ x: r.x, y: r.y, width: r.width, height: r.height })
 
-      const left = columnLeft()
       for (const it of state.items) {
         const el = document.createElement('div')
         el.textContent = it.text
-        el.style.cssText = `position:absolute;left:${left}px;top:${it.y}px;transform:translate(-50%,-50%);font:bold 15px sans-serif;color:${
+        el.style.cssText = `position:absolute;left:${it.x ?? columnLeft()}px;top:${it.y}px;transform:translate(-50%,-50%);font:bold 15px sans-serif;color:${
           it.top ? '#ffd24a' : '#e2e8f0'
         };background:rgba(0,0,0,0.82);padding:1px 6px;border-radius:3px;white-space:nowrap;pointer-events:none`
         container.appendChild(el)
@@ -379,7 +542,7 @@ export default function activate(ctx: ScalpelPluginContext): void {
       if (r.token !== drawnToken) {
         drawnToken = r.token
         if (r.open) {
-          current = { items: r.items, diag: r.diag }
+          current = { items: r.items, diag: r.diag, mode: r.mode }
           draw(current)
         } else {
           current = null
