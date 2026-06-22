@@ -30,7 +30,7 @@ interface Fire {
 
 // Label column X as a fraction of the game width from the left edge (the well box
 // sits at a fixed screen position, so this is stable regardless of OCR).
-const LABEL_COLUMN_FRAC = 0.14
+const LABEL_COLUMN_FRAC = 0.228
 const SCOUT_W = 1300
 const READ_W = 2600
 const EMPTY_DIAG: Diag = { loading: false, base: null, mods: [], note: null }
