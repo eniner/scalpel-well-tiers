@@ -1,12 +1,79 @@
-import { createWorker, type Worker } from 'tesseract.js'
+import { createWorker, PSM, type Worker } from 'tesseract.js'
 import type { Line, Word } from './segment'
 
-let workerP: Promise<Worker> | null = null
+/** Sink for tesseract's own progress events (worker init + recognize), so the UI
+ *  can show what the engine is doing during the multi-second OCR. Set by the
+ *  caller around an OCR run and cleared (null) when idle. */
+type ProgressSink = (status: string, progress: number) => void
+let progressSink: ProgressSink | null = null
+export function setOcrProgress(cb: ProgressSink | null): void {
+  progressSink = cb
+}
 
-/** Lazily create (and reuse) the tesseract worker. First call pays the init cost. */
-export function getWorker(): Promise<Worker> {
-  if (!workerP) workerP = createWorker('eng')
-  return workerP
+// Two workers so the base-tooltip and options passes can OCR concurrently.
+const POOL_SIZE = 2
+// Restrict recognition to the characters PoE mod/base text uses. (LSTM applies
+// this weakly, so it is mostly belt-and-braces, but it is harmless.)
+const CHAR_WHITELIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 %+-.,:'()/"
+
+/** Page-seg mode per pass. 'auto' = full layout analysis. 'block' = single
+ *  uniform block (cropped tooltip/options - skips layout). 'sparse' = find text
+ *  anywhere with no layout analysis (the scout, which only needs to locate the
+ *  hint/confirm tokens across a big region) - the cheapest mode. */
+export type OcrMode = 'auto' | 'block' | 'sparse'
+const psmFor = (mode: OcrMode): PSM =>
+  mode === 'block' ? PSM.SINGLE_BLOCK : mode === 'sparse' ? PSM.SPARSE_TEXT : PSM.AUTO
+
+interface Pooled {
+  worker: Worker
+  psm: PSM
+}
+let poolP: Promise<Pooled[]> | null = null
+const idle: Pooled[] = []
+const waiters: ((p: Pooled) => void)[] = []
+
+async function makeWorker(): Promise<Pooled> {
+  const worker = await createWorker('eng', undefined, {
+    logger: (m: { status?: string; progress?: number }) => {
+      if (progressSink) progressSink(m.status ?? '', typeof m.progress === 'number' ? m.progress : 0)
+    },
+  })
+  await worker.setParameters({ tessedit_char_whitelist: CHAR_WHITELIST })
+  return { worker, psm: PSM.AUTO } // createWorker initialises in AUTO
+}
+
+/** Lazily create the worker pool. A failed init resets the cache so a later call
+ *  retries instead of being stuck with a poisoned promise. */
+function initPool(): Promise<Pooled[]> {
+  if (!poolP)
+    poolP = Promise.all(Array.from({ length: POOL_SIZE }, makeWorker))
+      .then((ws) => {
+        idle.push(...ws)
+        return ws
+      })
+      .catch((e) => {
+        poolP = null
+        throw e
+      })
+  return poolP
+}
+
+async function acquire(): Promise<Pooled> {
+  await initPool()
+  const p = idle.pop()
+  return p ?? new Promise<Pooled>((res) => waiters.push(res))
+}
+
+function release(p: Pooled): void {
+  const next = waiters.shift()
+  if (next) next(p)
+  else idle.push(p)
+}
+
+/** Kick off pool creation ahead of the first OCR (e.g. at plugin load) so the
+ *  multi-second engine init is paid in the background, not on the first hotkey. */
+export function warmWorkers(): void {
+  void initPool().catch(() => {})
 }
 
 interface Frame {
@@ -31,7 +98,7 @@ type TW = { text: string; confidence: number; bbox: { x0: number; y0: number; x1
  *  normalize, and OCR. Returns words (for base detection) and tesseract's native lines
  *  (for option matching), with all boxes mapped back to original frame px. Cropping to
  *  the option strip and scaling it UP keeps the mod text large and the OCR stable. */
-export async function ocrRegion(frame: Frame, region: Region, targetW: number): Promise<OcrResult> {
+export async function ocrRegion(frame: Frame, region: Region, targetW: number, mode: OcrMode = 'auto'): Promise<OcrResult> {
   const rx = Math.max(0, Math.round(region.x))
   const ry = Math.max(0, Math.round(region.y))
   const rw = Math.max(1, Math.min(Math.round(region.w), frame.width - rx))
@@ -75,12 +142,26 @@ export async function ocrRegion(frame: Frame, region: Region, targetW: number): 
   }
   octx.putImageData(img, 0, 0)
 
-  const worker = await getWorker()
-  const { data } = await worker.recognize(out, {}, { blocks: true })
+  // Grab a worker from the pool, set this pass's page-seg mode if it changed,
+  // recognize, then release it. Holding the worker across both calls keeps the
+  // setParameters/recognize pair atomic when two passes run concurrently.
+  const psm = psmFor(mode)
+  const p = await acquire()
+  let raw: { words?: TW[]; lines?: { words?: TW[] }[] } = {}
+  try {
+    if (p.psm !== psm) {
+      await p.worker.setParameters({ tessedit_pageseg_mode: psm })
+      p.psm = psm
+    }
+    const { data } = await p.worker.recognize(out, {}, { blocks: true })
+    raw = data as unknown as { words?: TW[]; lines?: { words?: TW[] }[] }
+  } finally {
+    release(p)
+  }
   const inv = 1 / scale
   const fx = (x: number) => rx + x * inv
   const fy = (y: number) => ry + y * inv
-  const d = data as unknown as { words?: TW[]; lines?: { words?: TW[] }[] }
+  const d = raw
   const words: Word[] = (d.words ?? []).map((w) => ({
     text: w.text,
     confidence: w.confidence,

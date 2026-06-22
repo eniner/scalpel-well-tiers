@@ -1,3 +1,4 @@
+import baseIcons from './data/base-icons-poe2.json'
 import desecrated from './data/desecrated-poe2.json'
 import itemTiers from './data/tiers-poe2.json'
 import { normKey } from './normalize'
@@ -19,6 +20,10 @@ const item = itemTiers as unknown as ItemData
 
 /** Uppercased base-type name -> original-case name, for OCR base detection. */
 export const BASE_NAMES: Map<string, string> = new Map(Object.keys(item.bases).map((b) => [b.toUpperCase(), b]))
+
+/** Base-type name -> CDN art URL (PoE2 base-item subset of Scalpel's icon map),
+ *  for the hero image. Null when the base has no bundled icon. */
+export const baseIconUrl = (name: string): string | null => (baseIcons as Record<string, string>)[name] ?? null
 
 /** Raw stat -> displayed value divisor (RePoE stores some stats in internal units). */
 function divisor(id: string): number {
