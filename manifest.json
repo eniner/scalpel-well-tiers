@@ -1,7 +1,7 @@
 {
   "manifestVersion": 1,
   "id": "well-tiers",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "name": "Scalpel OCR",
   "description": "Adds the ability to set a hotkey that uses OCR to display tiers at the Well of Souls. More, eventually.",
   "author": "scalpelpoe",
