@@ -3,7 +3,16 @@ import { baseIconUrl, buildTierMap } from './dataset'
 import { detectBaseType, nearestBase } from './detect'
 import { extractOptions, findOptionsBoundary } from './match'
 import { ocrRegion, setOcrProgress, warmWorkers } from './ocr'
-import { buildPriceIndex, parseRewardCandidates, type PricedReward, priceRewards } from './rewards'
+import type { Line } from './segment'
+import { readRewardRows } from './row-read'
+import {
+  buildPriceIndex,
+  diagnoseCandidates,
+  type Candidate,
+  type PricedReward,
+  priceRewards,
+} from './rewards'
+import { canonicalRewardCount } from './rewards-catalog'
 import { SCALPEL_ICON } from './scalpel-icon'
 
 // Which supported screen this fire is for - selects the render path.
@@ -32,6 +41,8 @@ interface Diag {
   phase?: string
   // Runeshape-only status line field.
   updatedAt?: number | null
+  // Runeshape OCR/pricing trace (shown in the debug panel).
+  debug?: string | null
 }
 interface Fire {
   token: string
@@ -63,14 +74,6 @@ const PANEL_TOP_FRAC = 0.08
 const SCOUT_W = 1100
 const READ_W = 2600
 const BASE_W = 1600
-const REWARD_W = 1600
-// The Runeshape Combinations panel is a left-anchored book; PoE UI scales with
-// HEIGHT, so its bounds are height-fractions. Crop the reward read to just the
-// panel - this excludes the FPS overlay, the centre item tooltip, and the quest
-// log, which both speeds the OCR (and lifts quality: a smaller region upscales
-// more at the same target width) and stops their text becoming phantom rewards.
-const REWARD_PANEL_W_FRAC = 0.56
-const REWARD_PANEL_H_FRAC = 0.72
 // Status pill (poe.ninja + freshness) anchor, in the panel header - fractions of
 // game HEIGHT from the top-left, so it tracks the header across resolutions.
 const STATUS_LEFT_FRAC = 0.39
@@ -80,6 +83,34 @@ const STATUS_TOP_FRAC = 0.1
 // across resolutions). Tuned in-game.
 const RS_PRICE_X_FRAC = 0.503
 const EMPTY_DIAG: Diag = { loading: false, base: null, mods: [], note: null }
+
+const formatRuneshapeDebug = (
+  method: string,
+  rowLines: Line[],
+  candidates: Candidate[],
+  index: ReturnType<typeof buildPriceIndex>,
+  pricedCount: number,
+  priceCount: number,
+): string => {
+  const parts: string[] = []
+  parts.push(`reader: ${method}`)
+  parts.push(`poe.ninja entries: ${priceCount} (catalog: ${canonicalRewardCount()} names)`)
+  parts.push(`Rows read:`)
+  for (const l of rowLines) {
+    const t = l.text.replace(/\s+/g, ' ').trim()
+    if (!t) continue
+    parts.push(`  y=${Math.round(l.box.y).toString().padStart(3)} "${t}"`)
+  }
+  parts.push('')
+  parts.push(`Candidates (${candidates.length}) -> badges (${pricedCount}):`)
+  for (const d of diagnoseCandidates(candidates, index)) {
+    const flag = d.explicit ? 'Nx' : '  '
+    const badge = d.badge ?? '—'
+    parts.push(`  [${flag}] y=${String(d.y).padStart(3)} ${d.qty}x ${d.name}`)
+    parts.push(`       ${d.outcome} ${badge} | ${d.detail}`)
+  }
+  return parts.join('\n')
+}
 
 // Map tesseract's raw status strings to user-facing phase labels. During a
 // recognize pass the status is "recognizing text", which we render under the
@@ -124,43 +155,42 @@ async function priceRuneshapeRewards(
 ): Promise<void> {
   setStep('Reading rewards')
   pushPhase('Reading rewards...')
-  // Dedicated high-res read of the left panel. The low-res scout misses the
-  // small "Nx" prefixes and the header, so both detection AND parsing run off
-  // THIS pass, not the scout. Quantity is optional in parsing; the price lookup
-  // below is what separates real rewards from the header/FPS noise.
-  const read = await ocrRegion(
-    frame,
-    { x: 0, y: 0, w: frame.height * REWARD_PANEL_W_FRAC, h: frame.height * REWARD_PANEL_H_FRAC },
-    REWARD_W,
-    'block',
-  )
-  const candidates = parseRewardCandidates(read.lines)
+
+  const { lines: rowLines, candidates, method } = await readRewardRows(frame, (row, total) => {
+    pushPhase(`Reading row ${row}/${total}...`)
+  })
 
   setStep('Pricing rewards')
   pushPhase('Pricing rewards...')
   let priced: PricedReward[] = []
   let updatedAt: number | null = null
+  let priceIndex = buildPriceIndex([])
+  let priceCount = 0
   try {
-    // Pull the guaranteed currency set and the broad snapshot together, so
-    // currency rewards (the common case) always resolve even if the broad set
-    // omits a slug. buildPriceIndex de-dupes by name.
-    const [all, cur] = await Promise.all([ctx.prices.getPrices(), ctx.prices.getPrices({ category: 'currency' })])
-    updatedAt = all.updatedAt ?? cur.updatedAt
-    priced = priceRewards(candidates, buildPriceIndex([...all.prices, ...cur.prices]))
+    const [all, cur, runes, uncut] = await Promise.all([
+      ctx.prices.getPrices(),
+      ctx.prices.getPrices({ category: 'currency' }),
+      ctx.prices.getPrices({ category: 'runes' }),
+      ctx.prices.getPrices({ category: 'uncut-gems' }),
+    ])
+    updatedAt = all.updatedAt ?? cur.updatedAt ?? runes.updatedAt ?? uncut.updatedAt
+    const merged = [...all.prices, ...cur.prices, ...runes.prices, ...uncut.prices]
+    priceCount = merged.length
+    priceIndex = buildPriceIndex(merged)
+    priced = priceRewards(candidates, priceIndex)
   } catch (e) {
     ctx.log(`well-tiers: price fetch failed (${e instanceof Error ? e.message : String(e)})`)
-    // Offline: still show any explicit "Nx" rows as "?" so the screen isn't a
-    // dead end (priceRewards keeps those even with an empty index).
-    priced = priceRewards(candidates, buildPriceIndex([]))
+    priced = priceRewards(candidates, priceIndex)
   }
 
-  // Nothing priced and no explicit reward rows -> this isn't a (readable)
-  // Runeshape screen. Show what the high-res pass read so a miss is diagnosable.
-  if (priced.length === 0) {
-    const sample = read.lines
+  const debug = formatRuneshapeDebug(method, rowLines, candidates, priceIndex, priced.length, priceCount)
+  ctx.log(`well-tiers: runeshape debug\n${debug}`)
+
+  if (candidates.length === 0) {
+    const sample = rowLines
       .map((l) => l.text.trim())
       .filter(Boolean)
-      .slice(0, 8)
+      .slice(0, 16)
       .join('\n')
     ctx.log(`well-tiers: no supported screen detected. Read: ${sample.replace(/\n/g, ' | ')}`)
     await setFire(ctx, true, 'well', [], {
@@ -168,6 +198,7 @@ async function priceRuneshapeRewards(
       base: null,
       mods: [],
       note: `Not at a supported screen.\n\nScanned text:\n${sample || '(no text read)'}`,
+      debug,
     })
     return
   }
@@ -186,6 +217,7 @@ async function priceRuneshapeRewards(
     mods: [],
     note: items.length ? null : 'No rewards read',
     updatedAt,
+    debug,
   })
   ctx.log(`well-tiers: runeshape, ${items.length} rewards priced`)
 }
@@ -504,6 +536,21 @@ export default function activate(ctx: ScalpelPluginContext): void {
         pill.textContent = parts.join(' · ')
       }
       container.appendChild(pill)
+
+      if (d.debug) {
+        const dbg = document.createElement('div')
+        dbg.style.cssText =
+          'position:absolute;right:12px;bottom:12px;max-width:min(520px,42vw);max-height:45vh;overflow:auto;padding:10px 12px;background:rgba(12,12,18,0.94);border:1px solid rgba(198,169,110,0.35);border-radius:8px;color:#c8d0dc;font:11px/1.4 ui-monospace,Consolas,monospace;white-space:pre-wrap;pointer-events:auto;box-shadow:0 4px 20px rgba(0,0,0,0.6)'
+        const title = document.createElement('div')
+        title.textContent = 'Runeshape debug'
+        title.style.cssText = 'color:#c8a96e;font-weight:700;margin-bottom:6px;font-family:system-ui,sans-serif;font-size:12px'
+        const body = document.createElement('div')
+        body.textContent = d.debug
+        dbg.append(title, body)
+        container.appendChild(dbg)
+        const r = dbg.getBoundingClientRect()
+        ctx.setInteractiveRegion({ x: r.x, y: r.y, width: r.width, height: r.height })
+      }
     }
 
     const draw = (state: { items: Label[]; diag: Diag; mode: Mode }) => {

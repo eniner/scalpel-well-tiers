@@ -1,9 +1,9 @@
 {
   "manifestVersion": 1,
   "id": "well-tiers",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "name": "Scalpel OCR",
-  "description": "Adds an OCR hotkey that shows hidden affix tiers at the Well of Souls and prices the rewards for the RoA league mechanic",
+  "description": "OCR hotkey for Well of Souls affix tiers and Runeshape Combinations reward pricing (layout row detection + per-row masked OCR)",
   "author": "scalpelpoe",
   "homepage": "https://github.com/scalpelpoe/scalpel-well-tiers",
   "scalpelMinVersion": ">=0.9.16-rc1",
