@@ -12,7 +12,7 @@ import {
   type PricedReward,
   priceRewards,
 } from './rewards'
-import { canonicalRewardCount } from './rewards-catalog'
+import { canonicalRewardCount, isKnownRewardName } from './rewards-catalog'
 import { SCALPEL_ICON } from './scalpel-icon'
 
 // Which supported screen this fire is for - selects the render path.
@@ -83,6 +83,19 @@ const STATUS_TOP_FRAC = 0.1
 // across resolutions). Tuned in-game.
 const RS_PRICE_X_FRAC = 0.503
 const EMPTY_DIAG: Diag = { loading: false, base: null, mods: [], note: null }
+
+// On-screen Runeshape diagnostic panel gate. Off by default - the full trace is
+// always written to ctx.log (host log settings control its verbosity), so user
+// misses stay diagnosable without the box covering the game. Enable the in-overlay
+// panel from the overlay window's devtools console:
+//   localStorage.setItem('well-tiers:debug', '1')   // off: removeItem(...)
+const debugOverlayEnabled = (): boolean => {
+  try {
+    return localStorage.getItem('well-tiers:debug') === '1'
+  } catch {
+    return false
+  }
+}
 
 const formatRuneshapeDebug = (
   method: string,
@@ -186,7 +199,13 @@ async function priceRuneshapeRewards(
   const debug = formatRuneshapeDebug(method, rowLines, candidates, priceIndex, priced.length, priceCount)
   ctx.log(`well-tiers: runeshape debug\n${debug}`)
 
-  if (candidates.length === 0) {
+  // A real Runeshape page has rows that price to a value or match the reward
+  // catalog; an arbitrary screen (the scout fell through to here) reads as noise
+  // that does neither. candidates.length is no longer a usable signal: the row
+  // reader emits one candidate per detected band (often a "?" placeholder), so it
+  // is never zero. Gate on actually-recognized rewards instead.
+  const recognized = priced.some((p) => p.value != null) || candidates.some((c) => isKnownRewardName(c.name))
+  if (!recognized) {
     const sample = rowLines
       .map((l) => l.text.trim())
       .filter(Boolean)
@@ -537,7 +556,7 @@ export default function activate(ctx: ScalpelPluginContext): void {
       }
       container.appendChild(pill)
 
-      if (d.debug) {
+      if (d.debug && debugOverlayEnabled()) {
         const dbg = document.createElement('div')
         dbg.style.cssText =
           'position:absolute;right:12px;bottom:12px;max-width:min(520px,42vw);max-height:45vh;overflow:auto;padding:10px 12px;background:rgba(12,12,18,0.94);border:1px solid rgba(198,169,110,0.35);border-radius:8px;color:#c8d0dc;font:11px/1.4 ui-monospace,Consolas,monospace;white-space:pre-wrap;pointer-events:auto;box-shadow:0 4px 20px rgba(0,0,0,0.6)'

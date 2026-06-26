@@ -228,7 +228,13 @@ export async function ocrRegion(
   out.height = outH
   const octx = out.getContext('2d')
   if (!octx) return { words: [], lines: [] }
-  octx.imageSmoothingEnabled = false
+  // Bilinear resampling (master's default). The Well of Souls scout DOWNSCALES a
+  // wide region to SCOUT_W; nearest-neighbor (smoothingEnabled=false) aliases the
+  // shrunk text so badly the well's hint token is never found and the fire
+  // misroutes into the Runeshape path. Keep smoothing on for every pass; if a
+  // heavily-upscaled reward pass ever needs nearest-neighbor, opt that pass out
+  // explicitly rather than flipping the global default.
+  octx.imageSmoothingEnabled = true
   octx.drawImage(full, rx, ry, rw, rh, 0, 0, outW, outH)
 
   const img = octx.getImageData(0, 0, outW, outH)
